@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="glass">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:;">
+  <title>Lexica 字幕</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/subtitle.css">
+</head>
+<body class="sub-body">
+  <!-- 整个窗口就是一块字幕板。窗口本身无边框透明，
+       所有可见部分都在这个 .sub 里，圆角和背景由它给。 -->
+  <div class="sub" id="sub">
+    <!-- 顶部工具条：鼠标移到窗口上才出现，平时完全看不见 -->
+    <div class="sub-bar">
+      <span class="sub-drag" id="subDrag" title="拖动">⋮⋮</span>
+      <span class="sub-state" id="subState">正在启动…</span>
+      <div class="spacer"></div>
+      <button class="sub-btn" data-act="sub-font" data-v="-1" title="缩小字号">A−</button>
+      <button class="sub-btn" data-act="sub-font" data-v="1" title="放大字号">A+</button>
+      <button class="sub-btn" data-act="sub-lock" id="subLock"
+              title="锁定后鼠标可以穿过字幕点到后面的播放器">锁定</button>
+      <button class="sub-btn" data-act="sub-close" title="关闭">✕</button>
+    </div>
+
+    <div class="sub-lines" id="subLines">
+      <div class="sub-hint">开启后，这里会显示正在播放内容的英文与中文字幕。</div>
+    </div>
+  </div>
+
+  <script src="js/ui.js"></script>
+  <script src="../main/vad-chunker.js"></script>
+  <script src="js/audio-source.js"></script>
+  <script src="js/subtitle.js"></script>
+</body>
+</html>

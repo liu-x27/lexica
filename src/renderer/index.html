@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:;">
+  <title>Lexica 离线词典</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/drill.css">
+  <link rel="stylesheet" href="css/custom.css">
+  <link rel="stylesheet" href="css/translate.css">
+  <link rel="stylesheet" href="css/lecture.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 左侧导航 -->
+    <nav class="rail">
+      <div class="brand" title="Lexica">L</div>
+
+      <button class="nav-btn is-active" data-view="dict" data-tip="查词　Ctrl+K"></button>
+      <button class="nav-btn" data-view="translate" data-tip="整段翻译"></button>
+      <button class="nav-btn" data-view="lecture" data-tip="实时字幕　上课听写"></button>
+      <button class="nav-btn" data-view="drill" data-tip="按考纲练习"></button>
+      <button class="nav-btn" data-view="wordbook" data-tip="生词本　Ctrl+D 收藏"></button>
+      <button class="nav-btn" data-view="review" data-tip="复习"></button>
+      <button class="nav-btn" data-view="custom" data-tip="自定义词表与词条"></button>
+      <div class="spacer"></div>
+      <button class="nav-btn" data-act="toggle-theme" data-tip="切换主题"></button>
+      <button class="nav-btn" data-view="settings" data-tip="设置"></button>
+    </nav>
+
+    <div class="main">
+      <!-- 顶栏 -->
+      <header class="topbar">
+        <div class="nav-arrows">
+          <button class="icon-btn" data-act="back" title="后退" disabled></button>
+          <button class="icon-btn" data-act="forward" title="前进" disabled></button>
+        </div>
+
+        <div class="search" id="search">
+          <div class="search-field">
+            <span id="searchIcon"></span>
+            <input class="search-input" id="searchInput" type="text" spellcheck="false"
+                   autocomplete="off" placeholder="输入单词，或用中文反查…">
+            <button class="icon-btn hidden" id="clearBtn" title="清空"></button>
+            <span class="kbd">Ctrl K</span>
+          </div>
+          <div class="suggest hidden" id="suggest"></div>
+        </div>
+
+        <button class="icon-btn" data-act="random" title="随机一个好词"></button>
+      </header>
+
+      <!-- 内容区 -->
+      <div class="stage scroll" id="stage">
+        <section class="view is-active" id="view-dict"></section>
+        <section class="view" id="view-translate"></section>
+        <section class="view" id="view-lecture"></section>
+        <section class="view" id="view-drill"></section>
+        <section class="view" id="view-wordbook"></section>
+        <section class="view" id="view-review"></section>
+        <section class="view" id="view-custom"></section>
+        <section class="view" id="view-settings"></section>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/ui.js"></script>
+  <script src="js/entry-view.js"></script>
+  <script src="js/translate-view.js"></script>
+  <!-- 切分器与主进程共用同一份实现，双导出成 window.LexicaVad -->
+  <script src="../main/vad-chunker.js"></script>
+  <script src="js/audio-source.js"></script>
+  <script src="js/lecture-view.js"></script>
+  <script src="js/lecture.js"></script>
+  <script src="js/drill.js"></script>
+  <script src="js/custom.js"></script>
+  <script src="js/views.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

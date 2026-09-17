@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 只开放导出目录和日志，词库与 user.db 本体不对外暴露 -->
+    <files-path name="export" path="export/" />
+    <files-path name="log" path="lexica.log" />
+</paths>

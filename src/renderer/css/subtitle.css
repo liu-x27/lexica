@@ -1,0 +1,154 @@
+/* ==========================================================================
+   电影字幕悬浮窗
+   --------------------------------------------------------------------------
+   参照播放器字幕的观感：深色半透明底、白字、描边，放在画面下方也看得清。
+   窗口本身是无边框透明的，所有可见部分都在 .sub 里。
+   ========================================================================== */
+
+:root { --sub-scale: 1; }
+
+/* 窗口透明，body 不能有任何背景，否则会出现一个不透明的方块 */
+.sub-body {
+  background: transparent;
+  margin: 0;
+  overflow: hidden;
+  /* 字幕面板贴着窗口底部：拖到画面下方时，面板长高是往上长，
+     不会把字顶出画面外 */
+  display: flex;
+  align-items: flex-end;
+  height: 100vh;
+}
+
+.sub {
+  width: 100%;
+  max-height: 100vh;
+  padding: var(--sp-3) var(--sp-5) var(--sp-4);
+  border-radius: 12px;
+  background: rgba(8, 10, 14, 0.78);
+  backdrop-filter: blur(10px) saturate(120%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------------- 工具条 */
+
+/**
+ * 平时完全隐形，鼠标移到窗口上才出现。
+ * 看电影时任何常驻的控件都是干扰，但又必须能拖动和调字号，
+ * 所以用 hover 显隐——占位始终保留，出现时不会把字幕顶下去。
+ */
+.sub-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 20px;
+  opacity: 0;
+  transition: opacity var(--d-base) var(--ease-out);
+}
+.sub-body:hover .sub-bar { opacity: 1; }
+
+/* 这一块是窗口拖动区。-webkit-app-region 只在无边框窗口里有效 */
+.sub-drag {
+  -webkit-app-region: drag;
+  cursor: move;
+  padding: 0 4px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  letter-spacing: -2px;
+  user-select: none;
+}
+
+.sub-state {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+.sub-state.is-live { color: oklch(0.78 0.16 150); }
+.sub-state.is-live::before {
+  content: '● ';
+  animation: sub-pulse 1.6s ease-out infinite;
+}
+.sub-state.is-warn { color: oklch(0.82 0.15 75); }
+.sub-state.is-error { color: oklch(0.72 0.18 25); }
+@keyframes sub-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.sub-btn {
+  -webkit-app-region: no-drag;
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sub-btn:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+
+/* --------------------------------------------------------------- 字幕 */
+
+.sub-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  text-align: center;
+  /* 内容多时从底部开始显示，新字幕总在最下面 */
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.sub-line { animation: sub-in 220ms var(--ease-out) both; }
+@keyframes sub-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 描边用 text-shadow 叠四个方向：放在浅色画面上也能看清。
+   不用 -webkit-text-stroke，那个会让字变细、中文尤其难看。 */
+.sub-en {
+  font-size: calc(17px * var(--sub-scale));
+  line-height: 1.35;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    1px 0 2px rgba(0, 0, 0, 0.7),
+    -1px 0 2px rgba(0, 0, 0, 0.7),
+    0 -1px 2px rgba(0, 0, 0, 0.7);
+  user-select: text;
+}
+.sub-zh {
+  margin-top: 2px;
+  font-family: var(--font-zh);
+  font-size: calc(20px * var(--sub-scale));
+  line-height: 1.4;
+  font-weight: 600;
+  color: #fff;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.95),
+    1px 0 2px rgba(0, 0, 0, 0.8),
+    -1px 0 2px rgba(0, 0, 0, 0.8),
+    0 -1px 2px rgba(0, 0, 0, 0.8);
+  user-select: text;
+}
+/* 译文还没回来时不要留空行：留空的话每条字幕出现时会跳两次 */
+.sub-zh.is-pending {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: calc(13px * var(--sub-scale));
+  letter-spacing: 3px;
+}
+
+.sub-hint {
+  padding: var(--sp-3) 0;
+  font-size: calc(12px * var(--sub-scale));
+  color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+}

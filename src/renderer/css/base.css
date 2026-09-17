@@ -1,0 +1,296 @@
+/* ============================================================================
+   Lexica · 基础层：重置、排版原语、通用控件
+   ========================================================================= */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--ink);
+  background-color: var(--bg);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  user-select: none;
+  transition: background-color var(--d-slow) var(--ease-out), color var(--d-slow) var(--ease-out);
+}
+
+/* 释义与例句允许选中复制，其余 UI 不允许，避免误选 */
+.selectable, .sense-gloss, .sense-zh, .ex-en, .ex-zh, .word-head, .phonetic-text {
+  user-select: text;
+  cursor: text;
+}
+
+h1, h2, h3, h4, p, ul, ol, dl, dd, figure { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
+input { font: inherit; color: inherit; background: none; border: none; outline: none; }
+a { color: var(--link); text-decoration: none; }
+a:hover { color: var(--link-hover); }
+
+::selection { background: var(--accent-soft); color: var(--accent-ink); }
+
+/* ------------------------------------------------------------- 滚动条 */
+.scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.scroll::-webkit-scrollbar { width: 11px; height: 11px; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: var(--r-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  transition: background var(--d-base);
+}
+.scroll::-webkit-scrollbar-thumb:hover { background: var(--ink-ghost); background-clip: content-box; }
+
+/* ------------------------------------------------------- 排版原语 */
+
+/* 小型大写标签：区块标题、词性名、来源标注都用它 */
+.label {
+  font-family: var(--font-ui);
+  font-size: var(--fs-2xs);
+  font-weight: 620;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.label-rule {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.label-rule::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--rule) 0%, var(--rule-ghost) 100%);
+}
+
+.serif { font-family: var(--font-display); letter-spacing: var(--tracking-display); }
+.zh { font-family: var(--font-zh); }
+.mono { font-family: var(--font-mono); font-size: 0.92em; }
+.ipa { font-family: var(--font-ipa); font-feature-settings: 'kern' 1; }
+
+.dim { color: var(--ink-soft); }
+.faint { color: var(--ink-faint); }
+
+/* ------------------------------------------------------------- 按钮 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: 32px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
+  font-weight: 560;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  transition:
+    background var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out),
+    transform var(--d-fast) var(--ease-spring);
+  white-space: nowrap;
+}
+.btn:hover { background: var(--surface-hover); color: var(--ink); }
+.btn:active { transform: scale(0.97); background: var(--surface-active); }
+.btn[disabled] { opacity: 0.4; pointer-events: none; }
+/* 内联 SVG 没有固有尺寸，不给宽高会退化成 300×150 被挤没，图标就看不见了 */
+.btn svg { width: 15px; height: 15px; flex: none; stroke-width: 1.8; }
+
+.btn-outline { border-color: var(--rule); background: var(--surface); }
+.btn-outline:hover { border-color: var(--rule-strong); }
+
+.btn-accent {
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: transparent;
+  font-weight: 600;
+}
+.btn-accent:hover { background: var(--accent-hover); color: var(--accent-on); }
+
+/* 纯图标按钮 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  transition:
+    background var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    transform var(--d-fast) var(--ease-spring);
+}
+.icon-btn:hover { background: var(--surface-hover); color: var(--ink); }
+.icon-btn:active { transform: scale(0.9); }
+.icon-btn.is-on { color: var(--accent); background: var(--accent-soft); }
+.icon-btn svg { width: 17px; height: 17px; stroke-width: 1.7; }
+
+svg { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ------------------------------------------------------------- 滑块 */
+/* 原生 range 在 Windows 上是系统蓝，和整套配色冲突，这里完全重画 */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 20px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--meter-track);
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  margin-top: -5.5px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  border: 2px solid var(--accent);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--d-fast) var(--ease-spring);
+}
+input[type='range']:hover::-webkit-slider-thumb { transform: scale(1.15); }
+input[type='range']:active::-webkit-slider-thumb { transform: scale(0.95); }
+
+/* 下拉框：去掉系统外观，用自绘箭头 */
+select.btn {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: var(--sp-7);
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 15px center, right 10px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  color: var(--ink-soft);
+}
+
+/* 焦点可见性：只在键盘导航时出现 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+/* 两个搜索输入框的外层容器已经表达了焦点状态，
+   再叠一圈系统焦点框会显得很笨重，这里单独去掉 */
+.search-input:focus-visible,
+.quick-input:focus-visible { outline: none; }
+
+/* --------------------------------------------------------- 难度徽章 */
+/* 用 oklch 把「色相变量 + 主题明度变量」组合成成对的前景/背景色，
+   一套写法在两个主题下都保持同等可读性。 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 var(--sp-2) 0 7px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-3xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: oklch(var(--badge-l) var(--badge-c) var(--h));
+  background: oklch(var(--badge-bg-l) var(--badge-bg-c) var(--h));
+  box-shadow: inset 0 0 0 1px oklch(var(--badge-l) var(--badge-c) var(--h) / 0.18);
+  transition: transform var(--d-fast) var(--ease-spring);
+}
+.badge::before {
+  content: '';
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+.badge-zk    { --h: var(--hue-zk); }
+.badge-gk    { --h: var(--hue-gk); }
+.badge-cet4  { --h: var(--hue-cet4); }
+.badge-cet6  { --h: var(--hue-cet6); }
+.badge-ky    { --h: var(--hue-ky); }
+.badge-toefl { --h: var(--hue-toefl); }
+.badge-ielts { --h: var(--hue-ielts); }
+.badge-gre   { --h: var(--hue-gre); }
+.badge-oxford{ --h: var(--hue-oxford); }
+
+/* --------------------------------------------------------- 词形胶囊 */
+.capsule {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 5px var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  font-size: var(--fs-xs);
+  transition:
+    border-color var(--d-fast) var(--ease-out),
+    background var(--d-fast) var(--ease-out),
+    transform var(--d-fast) var(--ease-spring);
+}
+.capsule:hover { border-color: var(--rule-strong); background: var(--surface-hover); transform: translateY(-1px); }
+.capsule-key { font-size: var(--fs-3xs); color: var(--ink-faint); font-weight: 600; }
+.capsule-val { font-weight: 560; color: var(--ink); }
+
+/* ------------------------------------------------------- 可点词块 */
+.chip {
+  display: inline-block;
+  padding: 3px var(--sp-3);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
+  color: var(--link);
+  background: var(--surface);
+  border: 1px solid var(--rule-ghost);
+  cursor: pointer;
+  transition: all var(--d-fast) var(--ease-out);
+}
+.chip:hover {
+  color: var(--link-hover);
+  border-color: var(--rule-strong);
+  background: var(--surface-hover);
+  transform: translateY(-1px);
+}
+
+/* ----------------------------------------------------------- 工具类 */
+.row { display: flex; align-items: center; }
+.row-gap-2 { gap: var(--sp-2); }
+.row-gap-3 { gap: var(--sp-3); }
+.wrap { flex-wrap: wrap; }
+.spacer { flex: 1; }
+.hidden { display: none !important; }
+
+/* 入场动画：内容块依次浮现 */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.rise { animation: rise var(--d-slow) var(--ease-out) both; }
+
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

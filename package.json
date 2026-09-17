@@ -1,0 +1,35 @@
+{
+  "name": "lexica",
+  "productName": "Lexica",
+  "version": "0.1.0",
+  "description": "Lexica — 离线英语词典（ECDICT + WordNet + Tatoeba）",
+  "main": "src/main/index.js",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "fetch": "node --no-warnings scripts/fetch-data.mjs",
+    "build:db": "node --no-warnings --max-old-space-size=6144 scripts/build-db.mjs",
+    "data": "npm run fetch && npm run build:db",
+    "test": "node --no-warnings --test \"test/**/*.test.mjs\"",
+    "check:bom": "node scripts/check-bom.mjs",
+    "fetch:model": "node --no-warnings scripts/fetch-model.mjs",
+    "fetch:model:nllb": "node --no-warnings scripts/eval-mt-candidates.mjs --fetch nllb",
+    "fetch:asr": "node --no-warnings scripts/fetch-asr.mjs",
+    "eval:mt:all": "node --no-warnings scripts/eval-mt-candidates.mjs --run",
+    "eval:mt": "node --no-warnings scripts/eval-mt.mjs",
+    "icon": "electron scripts/make-icon.js",
+    "pack": "node --no-warnings scripts/pack.mjs",
+    "build:db:mobile": "node --no-warnings --max-old-space-size=6144 scripts/build-db-mobile.mjs --slim",
+    "build:www": "node scripts/build-android-www.mjs",
+    "apk": "npm run build:www && node scripts/build-apk.mjs"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0",
+    "rcedit": "^5.0.2"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "unbzip2-stream": "^1.4.3"
+  }
+}

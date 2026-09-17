@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 与桌面版一致的标志：衬线 L 加一个朱砂点 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- L 的竖笔 -->
+    <path
+        android:fillColor="#B3402F"
+        android:pathData="M38,30 h10 v38 h20 v10 h-30 z" />
+    <!-- 右下角的点 -->
+    <path
+        android:fillColor="#B3402F"
+        android:pathData="M72,68 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+</vector>

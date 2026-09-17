@@ -1,0 +1,176 @@
+/* ============================================================================
+   自定义词表 / 自定义词条
+   ========================================================================= */
+
+.cu-panel { display: flex; flex-direction: column; gap: var(--sp-6); }
+
+.cu-empty {
+  padding: var(--sp-8) var(--sp-6);
+  text-align: center;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-loose);
+  color: var(--ink-faint);
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--r-lg);
+}
+
+/* ------------------------------------------------------------- 表单 */
+.cu-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: var(--panel-border);
+  box-shadow: var(--shadow-sm);
+}
+.cu-form-row { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+.cu-form-row .cu-input { flex: 1; min-width: 180px; }
+
+.cu-input,
+.cu-textarea {
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  border: 1px solid transparent;
+  box-shadow: var(--shadow-inset);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  transition: border-color var(--d-base) var(--ease-out), background var(--d-base) var(--ease-out);
+}
+.cu-input::placeholder,
+.cu-textarea::placeholder { color: var(--ink-ghost); }
+.cu-input:focus,
+.cu-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface-raised);
+}
+.cu-input[readonly] { opacity: 0.7; }
+
+.cu-textarea {
+  resize: vertical;
+  min-height: 120px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+}
+
+.cl-preview {
+  font-size: var(--fs-2xs);
+  color: var(--ink-soft);
+  line-height: var(--lh-snug);
+}
+.cl-preview strong { color: var(--accent); }
+
+/* --------------------------------------------------------- 词表列表 */
+.cl-list { display: flex; flex-direction: column; }
+.cl-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--rule-ghost);
+}
+.cl-main { flex: 1; min-width: 0; cursor: pointer; }
+.cl-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 560;
+  letter-spacing: var(--tracking-tight);
+}
+.cl-meta { font-size: var(--fs-2xs); color: var(--ink-faint); margin-top: 2px; }
+
+/* --------------------------------------------------------- 词条列表 */
+.ce-list { display: flex; flex-direction: column; }
+.ce-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--rule-ghost);
+}
+.ce-main { flex: 1; min-width: 0; }
+.ce-word {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 560;
+}
+.ce-zh {
+  font-family: var(--font-zh);
+  font-size: var(--fs-sm);
+  color: var(--ink-soft);
+  margin-top: 2px;
+}
+.ce-note {
+  font-size: var(--fs-2xs);
+  color: var(--ink-ghost);
+  margin-top: 3px;
+}
+
+/* 词条页里标明这是用户自建的 */
+.custom-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-xs);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: var(--fs-3xs);
+  font-weight: 650;
+}
+
+/* ====================================================================== */
+/*  术语表                                                                */
+/* ====================================================================== */
+
+.gl-list {
+  display: flex;
+  flex-direction: column;
+  /* 条目可能上百条，限高滚动，否则下面的批量粘贴框会被顶到看不见 */
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.gl-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--rule-ghost);
+}
+.gl-main { flex: 1; min-width: 0; }
+.gl-en {
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  font-weight: 560;
+}
+.gl-arrow {
+  display: inline-flex;
+  color: var(--ink-ghost);
+}
+.gl-arrow svg { width: 14px; height: 14px; }
+.gl-zh {
+  font-family: var(--font-zh);
+  font-size: var(--fs-sm);
+  font-weight: 560;
+  color: var(--accent-ink);
+}
+/* 实际修正过多少次。数字小不代表没用——只有模型译错时才会计数 */
+.gl-hits {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: var(--fs-3xs);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.gl-wrong {
+  font-size: var(--fs-2xs);
+  color: var(--ink-ghost);
+  margin-top: 3px;
+}
+.gl-pending { font-style: italic; opacity: 0.7; }

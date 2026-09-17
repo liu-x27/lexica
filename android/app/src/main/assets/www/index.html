@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <!-- 全部资源都在 assets 里，页面是 file:///android_asset/ 源；不放开任何远程来源。
+       'self' 和 file: 两种写法都写上：file:// 源下 'self' 的匹配行为在各版本
+       WebView 里并不一致，只写一种可能整页脚本被拦，表现是纯白屏没有任何报错。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; font-src 'self' file:; img-src 'self' file: data:; connect-src 'none'">
+  <title>Lexica 离线词典</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/drill.css">
+  <link rel="stylesheet" href="css/custom.css">
+  <link rel="stylesheet" href="css/translate.css">
+  <!-- 移动端覆盖放最后：它要压住上面几份里的桌面布局 -->
+  <link rel="stylesheet" href="css/mobile.css">
+</head>
+<body>
+  <div class="app">
+    <div class="main">
+      <!-- 顶栏：手机上只留搜索框和随机词，前进/后退交给系统返回键 -->
+      <header class="topbar">
+        <div class="search" id="search">
+          <div class="search-field">
+            <span id="searchIcon"></span>
+            <input class="search-input" id="searchInput" type="search" spellcheck="false"
+                   autocomplete="off" placeholder="输入单词，或用中文反查…">
+            <button class="icon-btn hidden" id="clearBtn" title="清空"></button>
+          </div>
+          <div class="suggest hidden" id="suggest"></div>
+        </div>
+
+        <button class="icon-btn" data-act="random" title="随机一个好词"></button>
+      </header>
+
+      <!-- 内容区 -->
+      <div class="stage scroll" id="stage">
+        <section class="view is-active" id="view-dict"></section>
+        <section class="view" id="view-drill"></section>
+        <section class="view" id="view-wordbook"></section>
+        <section class="view" id="view-review"></section>
+        <section class="view" id="view-custom"></section>
+        <section class="view" id="view-settings"></section>
+      </div>
+    </div>
+
+    <!-- 底部导航。类名与 data-view 和桌面版的侧边栏保持一致，
+         app.js 的 switchView / refreshBadge 因此不用改。
+
+         文字标签走 data-label + CSS ::after，不能写成子元素：
+         app.js 的 paintIcons() 会把图标 SVG 直接赋给 innerHTML，子元素会被冲掉。 -->
+    <nav class="rail">
+      <button class="nav-btn is-active" data-view="dict" data-label="查词"></button>
+      <button class="nav-btn" data-view="drill" data-label="练习"></button>
+      <button class="nav-btn" data-view="wordbook" data-label="生词本"></button>
+      <button class="nav-btn" data-view="review" data-label="复习"></button>
+      <button class="nav-btn" data-view="custom" data-label="词表"></button>
+      <button class="nav-btn" data-view="settings" data-label="设置"></button>
+    </nav>
+  </div>
+
+  <!-- 数据层：桥 → CommonJS 运行时 → 三个共用模块 → window.lexica -->
+  <script src="js/android-sqlite.js"></script>
+  <script src="js/cjs-runtime.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/lexica-shim.js"></script>
+
+  <!-- 渲染层：与桌面版逐字节相同 -->
+  <script src="js/ui.js"></script>
+  <script src="js/mobile.js"></script>
+  <script src="js/entry-view.js"></script>
+  <!-- 没有翻译模型，但分享一整句进来时要靠它渲染术语对照页 -->
+  <script src="js/translate-view.js"></script>
+  <script src="js/drill.js"></script>
+  <script src="js/custom.js"></script>
+  <script src="js/views.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

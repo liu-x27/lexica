@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 底色跟纸质主题一致，避免启动瞬间白闪 -->
+    <style name="Theme.Lexica" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/paper_bg</item>
+        <item name="android:statusBarColor">@color/paper_tint</item>
+        <item name="android:navigationBarColor">@color/paper_tint</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

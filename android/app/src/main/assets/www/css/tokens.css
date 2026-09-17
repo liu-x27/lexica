@@ -1,0 +1,232 @@
+/* ============================================================================
+   Lexica · 设计令牌
+   两套主题（paper 纸质浅色 / glass 玻璃深色）共用同一层语义变量。
+   组件只使用语义变量（--bg / --ink / --accent …），不直接写色值。
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- 字体 */
+/* 字体文件由 scripts/fetch-data.mjs 下载到 assets/fonts；缺失时自动退回系统字体 */
+@font-face {
+  font-family: 'Lexica Sans';
+  src: url('../../../assets/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Lexica Serif';
+  src: url('../../../assets/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Lexica Serif';
+  src: url('../../../assets/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations');
+  font-weight: 200 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+:root {
+  /* 正文字号倍率，由设置页写入。只作用于内容型字号，
+     界面骨架（导航、按钮、标签）保持固定，避免布局被拉变形。 */
+  --font-scale: 1;
+
+  /* ---------------------------------------------------------- 字体栈 */
+  --font-ui: 'Lexica Sans', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-display: 'Lexica Serif', 'Segoe UI Variable Display', Georgia, 'Times New Roman', serif;
+  --font-zh: 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --font-zh-serif: 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', var(--font-zh);
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, ui-monospace, monospace;
+  /* IPA 音标：Inter 与 Segoe UI 的国际音标扩展覆盖都不错 */
+  --font-ipa: 'Lexica Sans', 'Segoe UI', 'Charis SIL', 'Doulos SIL', serif;
+
+  /* ------------------------------------------------------ 字号阶梯 */
+  /* 1.20 模块化比例，14px 为正文基准 */
+  --fs-3xs: 0.6875rem;  /* 11px  角标 */
+  --fs-2xs: 0.75rem;    /* 12px  小型大写标签 */
+  --fs-xs:  0.8125rem;  /* 13px  次要说明 */
+  --fs-sm:  0.875rem;   /* 14px  正文 */
+  --fs-md:  1rem;       /* 16px  释义 */
+  --fs-lg:  1.1875rem;  /* 19px  小标题 */
+  --fs-xl:  1.5rem;     /* 24px  区块标题 */
+  --fs-2xl: 2rem;       /* 32px */
+  --fs-3xl: 2.875rem;   /* 46px  词头 */
+  --fs-4xl: 4rem;       /* 64px  空态大字 */
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.35;
+  --lh-normal: 1.6;
+  --lh-loose: 1.85;
+
+  --tracking-caps: 0.09em;   /* 小型大写标签的字距 */
+  --tracking-tight: -0.018em;
+  --tracking-display: -0.024em;
+
+  /* ---------------------------------------------------------- 间距 */
+  /* 4px 基准栅格 */
+  --sp-1: 0.25rem;  --sp-2: 0.5rem;   --sp-3: 0.75rem;  --sp-4: 1rem;
+  --sp-5: 1.25rem;  --sp-6: 1.5rem;   --sp-7: 2rem;     --sp-8: 2.5rem;
+  --sp-9: 3rem;     --sp-10: 4rem;    --sp-12: 6rem;
+
+  /* -------------------------------------------------------- 圆角 */
+  --r-xs: 3px;  --r-sm: 6px;  --r-md: 10px;
+  --r-lg: 14px; --r-xl: 20px; --r-pill: 999px;
+
+  /* -------------------------------------------------------- 动效 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);        /* 主力：出场、展开 */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1); /* 轻微回弹，用于图标反馈 */
+  --d-fast: 120ms;
+  --d-base: 200ms;
+  --d-slow: 340ms;
+  --d-lazy: 520ms;
+
+  /* -------------------------------------------------------- 布局 */
+  --rail-w: 68px;
+  --content-max: 780px;   /* 正文最佳阅读宽度 */
+  --aside-w: 264px;
+  --topbar-h: 60px;
+
+  /* ------------------------------------------------- 难度标签色相 */
+  /* 每个考试一个固定色相，两套主题下用 oklch 调明度即可保持识别度 */
+  --hue-zk: 145;    /* 中考   绿 */
+  --hue-gk: 168;    /* 高考   青绿 */
+  --hue-cet4: 232;  /* 四级   蓝 */
+  --hue-cet6: 262;  /* 六级   蓝紫 */
+  --hue-ky: 292;    /* 考研   紫 */
+  --hue-toefl: 32;  /* 托福   橙 */
+  --hue-ielts: 12;  /* 雅思   朱红 */
+  --hue-gre: 348;   /* GRE    洋红 */
+  --hue-oxford: 88; /* 牛津   橄榄 */
+}
+
+/* ==========================================================================
+   主题一 · paper —— 暖白纸张、衬线词头、红黑双色、发丝分隔线
+   ======================================================================== */
+:root[data-theme='paper'] {
+  color-scheme: light;
+
+  --bg: #faf7f1;
+  --bg-tint: #f4efe5;          /* 侧栏、次级区域 */
+  --bg-sunken: #efe9dc;        /* 输入框内凹 */
+  --surface: #fffdf9;
+  --surface-raised: #ffffff;
+  --surface-hover: #f7f2e8;
+  --surface-active: #f0e9db;
+
+  --ink: #1c1a17;              /* 正文墨色，非纯黑 */
+  --ink-strong: #100e0c;
+  --ink-soft: #5a534a;
+  --ink-faint: #8d8479;
+  --ink-ghost: #b5aca0;
+  --ink-invert: #fdfbf7;
+
+  --rule: #e5ddcd;             /* 发丝线 */
+  --rule-strong: #d3c9b5;
+  --rule-ghost: #efe8db;
+
+  --accent: #b3402f;           /* 朱砂红：词头装饰、强调 */
+  --accent-hover: #983526;
+  --accent-soft: #f6e6e1;
+  --accent-ink: #8f2e20;
+  --accent-on: #fff8f6;
+
+  --link: #2f5468;             /* 靛青：可点词条 */
+  --link-hover: #1e3d4d;
+
+  --pos-noun: #8f2e20;         /* 词性标签统一走朱砂，靠字重区分 */
+  --highlight: #fbeec4;        /* 例句中命中词的高亮底 */
+  --highlight-ink: #6b4d0a;
+
+  --shadow-sm: 0 1px 2px rgba(60, 48, 30, 0.06), 0 1px 1px rgba(60, 48, 30, 0.04);
+  --shadow-md: 0 2px 6px rgba(60, 48, 30, 0.07), 0 8px 20px -8px rgba(60, 48, 30, 0.10);
+  --shadow-lg: 0 4px 12px rgba(60, 48, 30, 0.08), 0 24px 48px -16px rgba(60, 48, 30, 0.16);
+  --shadow-inset: inset 0 1px 2px rgba(60, 48, 30, 0.07);
+
+  --panel-blur: none;
+  --panel-border: 1px solid var(--rule);
+  --panel-bg: var(--surface);
+
+  /* 纸张纤维质感：极淡的双层网点，不干扰阅读 */
+  --texture: radial-gradient(circle at 12% 22%, rgba(140, 110, 60, 0.035) 0 1px, transparent 1px),
+             radial-gradient(circle at 68% 74%, rgba(140, 110, 60, 0.028) 0 1px, transparent 1px);
+  --texture-size: 17px 17px, 23px 23px;
+
+  --badge-l: 42%;   /* 难度徽章：文字明度 */
+  --badge-bg-l: 95%;
+  --badge-c: 0.09;  /* 彩度 */
+  --badge-bg-c: 0.045;
+
+  --meter-track: #e7dfd0;
+  --star-on: #c9992e;
+  --star-off: #ded5c4;
+}
+
+/* ==========================================================================
+   主题二 · glass —— 深色玻璃、青紫渐变、命令面板式搜索
+   ======================================================================== */
+:root[data-theme='glass'] {
+  color-scheme: dark;
+
+  --bg: #0a0d12;
+  --bg-tint: #0e1219;
+  --bg-sunken: #070a0e;
+  --surface: rgba(255, 255, 255, 0.038);
+  --surface-raised: rgba(255, 255, 255, 0.062);
+  --surface-hover: rgba(255, 255, 255, 0.075);
+  --surface-active: rgba(255, 255, 255, 0.105);
+
+  --ink: #e3e9f2;
+  --ink-strong: #f7fafd;
+  --ink-soft: #9aa7ba;
+  --ink-faint: #6b7789;
+  --ink-ghost: #4a5568;
+  --ink-invert: #0a0d12;
+
+  --rule: rgba(255, 255, 255, 0.085);
+  --rule-strong: rgba(255, 255, 255, 0.16);
+  --rule-ghost: rgba(255, 255, 255, 0.045);
+
+  --accent: #6ee7d4;           /* 青 */
+  --accent-hover: #8ff0e1;
+  --accent-soft: rgba(110, 231, 212, 0.13);
+  --accent-ink: #6ee7d4;
+  --accent-on: #04211c;
+
+  --link: #93b4ff;
+  --link-hover: #b5cbff;
+
+  --pos-noun: #6ee7d4;
+  --highlight: rgba(255, 214, 102, 0.17);
+  --highlight-ink: #ffd977;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  --panel-blur: saturate(180%) blur(22px);
+  --panel-border: 1px solid var(--rule);
+  --panel-bg: rgba(18, 23, 31, 0.72);
+
+  /* 深色下用两团极大的光晕代替纸纹，制造纵深 */
+  --texture: radial-gradient(900px 620px at 12% -12%, rgba(110, 231, 212, 0.075), transparent 62%),
+             radial-gradient(760px 560px at 92% 8%, rgba(129, 140, 248, 0.085), transparent 60%);
+  --texture-size: auto, auto;
+
+  --badge-l: 82%;
+  --badge-bg-l: 26%;
+  --badge-c: 0.13;
+  --badge-bg-c: 0.06;
+
+  --meter-track: rgba(255, 255, 255, 0.09);
+  --star-on: #f3cf63;
+  --star-off: rgba(255, 255, 255, 0.15);
+}
+
+/* 减弱动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --d-fast: 0ms; --d-base: 0ms; --d-slow: 0ms; --d-lazy: 0ms;
+  }
+}

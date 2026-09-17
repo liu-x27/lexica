@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:;">
+  <title>Lexica 悬浮查词</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/quick.css">
+</head>
+<body class="quick-body">
+  <div class="quick">
+    <header class="quick-bar">
+      <span id="qIcon"></span>
+      <input class="quick-input" id="qInput" type="text" spellcheck="false" autocomplete="off"
+             placeholder="查词…　Esc 关闭　Enter 在主窗口打开">
+      <button class="icon-btn" id="qExpand" title="在主窗口打开"></button>
+      <button class="icon-btn" id="qClose" title="关闭（Esc）"></button>
+    </header>
+    <div class="quick-body-scroll scroll" id="qBody"></div>
+  </div>
+  <script src="js/ui.js"></script>
+  <script src="js/quick.js"></script>
+</body>
+</html>

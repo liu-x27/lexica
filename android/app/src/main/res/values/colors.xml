@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 tokens.css 的纸质主题保持一致 -->
+    <color name="paper_bg">#FAF7F1</color>
+    <color name="paper_tint">#F4EFE5</color>
+    <color name="accent">#B3402F</color>
+</resources>

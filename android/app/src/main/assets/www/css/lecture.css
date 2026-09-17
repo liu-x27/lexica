@@ -1,0 +1,271 @@
+/* ==========================================================================
+   实时字幕
+   --------------------------------------------------------------------------
+   版式的核心是「英中对照、原文常驻」：识别和翻译各有各的错法
+   （whisper 会把 training 听成 twinning，翻译模型会把 63.8 写成 638），
+   所以没有「只看中文」的排版。
+   ========================================================================== */
+
+.lec-page { gap: var(--sp-5); }
+
+/* ------------------------------------------------------------- 控制条 */
+
+.lec-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  padding: var(--sp-4) var(--sp-5);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: var(--panel-border);
+  box-shadow: var(--shadow-sm);
+}
+.lec-bar-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex: 1;
+  min-width: 260px;
+}
+.lec-bar-actions { display: flex; align-items: center; gap: var(--sp-3); }
+
+.lec-title {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  border: 1px solid transparent;
+  color: var(--ink);
+  font-size: var(--fs-sm);
+}
+.lec-title:focus { outline: none; border-color: var(--accent); }
+.lec-title::placeholder { color: var(--ink-ghost); }
+.lec-sources { flex: none; }
+
+/* 录制中的红点与计时 */
+.lec-live {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+.lec-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: oklch(var(--badge-l) 0.19 25);
+  animation: lec-pulse 1.6s var(--ease-out) infinite;
+}
+@keyframes lec-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+
+/* 输入电平条：没声音时一眼能看出来是麦克风的问题 */
+.lec-meter {
+  width: 64px;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--rule);
+  overflow: hidden;
+}
+.lec-meter > i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 90ms linear;
+}
+
+.lec-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-2xs);
+  color: var(--ink-soft);
+  padding: 0 var(--sp-2);
+}
+
+/* ------------------------------------------------------------- 字幕列表 */
+
+/**
+ * 高度用 clamp 而不是 flex 撑满：这一页是 .page 里的网格子项，
+ * 撑满会让列表自己不再溢出、滚动落到外层 #stage 上，
+ * 自动滚到底就失效了（scrollTop 加在没有溢出的元素上是空操作）。
+ */
+.lec-list {
+  max-height: clamp(280px, 56vh, 680px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.lec-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3);
+  border-radius: var(--r-sm);
+  animation: lec-in var(--d-base) var(--ease-out) both;
+}
+.lec-row:nth-child(odd) { background: var(--bg-tint); }
+@keyframes lec-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.lec-time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-3xs);
+  color: var(--ink-ghost);
+  padding-top: 3px;
+  text-align: right;
+}
+.lec-texts { min-width: 0; }
+.lec-en {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--ink);
+  user-select: text;
+}
+.lec-zh {
+  margin-top: 3px;
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--accent-soft);
+  font-family: var(--font-zh);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--ink-soft);
+  user-select: text;
+}
+.lec-zh.is-pending,
+.lec-zh.is-empty {
+  color: var(--ink-ghost);
+  font-size: var(--fs-2xs);
+  border-left-color: var(--rule);
+}
+
+.lec-empty {
+  padding: var(--sp-9) var(--sp-5);
+  text-align: center;
+  color: var(--ink-ghost);
+  font-size: var(--fs-sm);
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--r-lg);
+}
+
+.lec-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-2xs);
+}
+
+.lec-warn {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: oklch(var(--badge-bg-l) 0.06 70);
+  color: oklch(var(--badge-l) 0.14 70);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-snug);
+}
+
+/* ------------------------------------------------------------- 导入进度 */
+
+.lec-import {
+  padding: var(--sp-4) var(--sp-5);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: var(--panel-border);
+}
+.lec-import-text { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
+.lec-import-bar {
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--rule);
+  overflow: hidden;
+  margin-bottom: var(--sp-2);
+}
+.lec-import-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transition: width var(--d-base) var(--ease-out);
+}
+
+/* --------------------------------------------------------------- 历史 */
+
+.lec-history { display: flex; flex-direction: column; gap: 1px; }
+.lec-hist {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4);
+  background: var(--surface);
+  border-radius: var(--r-sm);
+}
+.lec-hist:hover { background: var(--surface-hover); }
+.lec-hist-main { flex: 1; min-width: 0; }
+.lec-hist-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 560;
+  color: var(--ink);
+}
+.lec-hist-sub {
+  margin-top: 2px;
+  font-size: var(--fs-2xs);
+  color: var(--ink-ghost);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.lec-hist-files { margin-top: var(--sp-2); display: flex; gap: 4px; }
+.lec-file {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  background: var(--bg-sunken);
+  border: 1px solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+.lec-tag-warn {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  background: oklch(var(--badge-bg-l) 0.07 70);
+  color: oklch(var(--badge-l) 0.15 70);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* 记录格式是多选，四个按钮在窄一点的设置页里放不下一行 */
+.seg.seg-wrap { flex-wrap: wrap; height: auto; }
+
+/* 领域提示词是多行的，设置页里其它控件都是单行，这里单独给个样式 */
+.set-prompt {
+  width: min(420px, 100%);
+  padding: var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-relaxed);
+  resize: vertical;
+}
+.set-prompt:focus { outline: none; border-color: var(--accent); }

@@ -1,0 +1,2836 @@
+'use strict';
+/**
+ * Lexica 主进程：窗口、托盘、全局热键、IPC。
+ * 词典库只读打开一次，主窗口与悬浮查词窗共用同一个连接。
+ */
+const path = require('node:path');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const {
+  app, BrowserWindow, ipcMain, globalShortcut, Tray, Menu,
+  nativeImage, shell, dialog, screen, clipboard,
+} = require('electron');
+
+const { DictDB } = require('./dict-db');
+const { UserDB } = require('./user-db');
+const { Quiz, SCOPE_LABELS, KIND_LABELS, checkSpelling } = require('./quiz');
+const logger = require('./logger');
+const { SelectionWatcher } = require('./selection');
+const { Translator } = require('./translate');
+const {
+  matchTerms, applyGlossary, needProbe, cleanProbe, diffMiddle, frameDiffOk,
+  PROBE_FRAME, PROBE_CONTROL,
+} = require('./glossary');
+const { AsrEngine } = require('./asr');
+const { LectureRecorder } = require('./lecture');
+
+/* 单实例：第二次启动只唤起已有窗口 */
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const RENDERER = path.join(ROOT, 'src', 'renderer');
+
+/** 词典库位置：开发时在 data/，打包后在 resources/data/ */
+function resolveDictPath() {
+  const candidates = [
+    path.join(ROOT, 'data', 'dict.db'),
+    path.join(process.resourcesPath || '', 'data', 'dict.db'),
+    path.join(path.dirname(app.getPath('exe')), 'data', 'dict.db'),
+  ];
+  return candidates.find((p) => p && fs.existsSync(p)) || candidates[0];
+}
+
+/**
+ * 默认热键不用 Alt+Space —— 那是 Windows 打开窗口系统菜单的固定快捷键，
+ * 注册一定失败（实测报「热键已被其它程序占用」）。
+ */
+const HOTKEY_FALLBACKS = ['Ctrl+Alt+Space', 'Ctrl+Shift+Space', 'Ctrl+Alt+D', 'Ctrl+Shift+F12'];
+
+/**
+ * 实时字幕里单段音频的上限（秒）。
+ *
+ * 这个值同时喂给两处，必须一致，否则会出静默故障：
+ *   - 渲染层的 VadChunker.maxMs —— 决定最长攒多久就强切；
+ *   - AsrEngine 的 --audio-ctx  —— 决定 whisper 编码器能看多长。
+ * 前者大于后者时，超出部分不是被丢掉，而是让模型退化成重复循环
+ * （实测 ac=512 喂 14 秒音频会反复吐同一句）。
+ */
+const LECTURE_MAX_CHUNK_SEC = 9;
+
+const DEFAULTS = {
+  theme: 'paper',
+  hotkey: HOTKEY_FALLBACKS[0],
+  hotkeyEnabled: true,
+  autoLaunch: false,
+  minimizeToTray: true,
+  ttsRate: 0.95,
+  ttsVoice: null,
+  showAside: true,
+  fontScale: 1, // 正文字号倍率，0.9 / 1 / 1.1 / 1.2
+  // 每日目标，0 表示不设目标
+  dailyNew: 10,
+  dailyReviews: 30,
+  dailyQuiz: 20,
+  // 窗口状态：{ x, y, width, height, maximized }
+  windowState: null,
+  clipboardLookup: false, // 剪贴板取词（复制即查）
+  // 划词取词：off 关闭 / hotkey 按热键取当前选区 / auto 松开鼠标即取词
+  selectionMode: 'off',
+  selectionHotkey: 'Ctrl+Alt+X',
+  // UIA 读不到时是否允许模拟 Ctrl+C 兜底（会短暂占用剪贴板，用完还原）
+  selectionCopyFallback: true,
+  // 词典给不出整体释义时自动跑机器翻译。划词场景下再要求手动点就违背了初衷，
+  // 所以默认开；结果始终标注为机器翻译，且排在逐词拆解之后。
+  mtAuto: true,
+  drillScope: 'cet4',
+
+  /* ---- 实时字幕 ---- */
+  /**
+   * 翻译模型。查词、划词、整段翻译都用它，默认 nllb——
+   * 实测 opus 会把数字改错（63.8 → 638），读论文时这比慢几秒危险得多。
+   * 没装 nllb 时 Translator 会自动回落到已装的那个。
+   */
+  mtModel: 'nllb',
+  /**
+   * 实时字幕单独用一个更快的模型，默认 opus。
+   *
+   * 理由是实测出来的：nllb 和 whisper 在同一颗 CPU 上会互相抢核，
+   * 两边一起变慢——一节课的字幕只识别出四分之一，识别队列 25 秒都排不完。
+   * 而实时场景本来就是英中对照显示，英文原文一直在旁边；
+   * 转写文件里也留着英文，课后想要更准的译文可以用翻译页重译。
+   */
+  lectureMtModel: 'opus',
+  /* 识别模型。实测 WER：tiny 未测 / base 4.7% / small + beam + 提示词 0.8%。
+     small 在常驻服务 + audio-ctx 下有 3.7 倍实时余量，所以默认用它——
+     早先「small 跑不动」是拿旧配置测出来的错结论。 */
+  asrModel: 'small',
+  /**
+   * 识别用的领域提示词。
+   *
+   * 这是单项收益最大的一项：whisper 把它当已转写的上文，于是更倾向于
+   * 输出里面出现过的写法。实测 base 的 WER 从 4.7% 降到 3.1%，
+   * small 从 4.7% 降到 1.6%——能把 "twinning" 这种同音错词拉回 "training"。
+   *
+   * 默认给一段通用学术词汇；每门课的专有名词由「课程名」和这里的自定义内容补。
+   */
+  asrPrompt: 'Lecture transcript. Terms: algorithm, hypothesis, parameter, variance, '
+    + 'coefficient, derivative, matrix, neural network, gradient descent, distribution, '
+    + 'regression, significance, correlation, dataset, benchmark, framework, analysis.',
+  // 音频来源：mic 麦克风（线下课）/ system 系统声音（网课）
+  lectureSource: 'mic',
+  // 每次记录要生成哪几种文件
+  lectureFormats: ['md', 'txt', 'srt', 'json'],
+  // 多长的停顿算一句话说完。教室回声大时可以调大
+  lectureSilenceMs: 420,
+
+  /* ---- 电影字幕悬浮窗 ---- */
+  subtitleHotkey: 'Ctrl+Alt+S',
+  subtitleFontScale: 1,
+  // 同时显示几条字幕。看电影一般两条够（当前 + 上一条）
+  subtitleLines: 2,
+  // 窗口位置与尺寸，{ x, y, width, height }
+  subtitleBounds: null,
+};
+
+const THEME_CHROME = {
+  paper: { color: '#f4efe5', symbolColor: '#5a534a' },
+  glass: { color: '#0e1219', symbolColor: '#9aa7ba' },
+};
+
+let dict = null;
+let user = null;
+let quiz = null;
+let clipTimer = null;
+let lastClip = '';
+let selection = null;
+let translator = null;
+let asr = null;
+let lectures = null;
+let mainWin = null;
+let quickWin = null;
+let subWin = null;
+let tray = null;
+let settings = { ...DEFAULTS };
+let quitting = false;
+
+/* ========================================================================== */
+/*  窗口                                                                       */
+/* ========================================================================== */
+
+/**
+ * 校验上次保存的窗口位置在当前显示器布局下是否还可见。
+ * 外接屏拔掉后，原来的坐标会把窗口放到屏幕外，用户会以为程序没启动。
+ */
+function sanitizeBounds(saved) {
+  if (!saved || !Number.isFinite(saved.width) || !Number.isFinite(saved.height)) return null;
+  const width = Math.max(880, Math.round(saved.width));
+  const height = Math.max(600, Math.round(saved.height));
+  if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return { width, height };
+
+  const x = Math.round(saved.x);
+  const y = Math.round(saved.y);
+  // 只要标题栏还有一块落在某个显示器的工作区内就认为可见
+  const visible = screen.getAllDisplays().some((d) => {
+    const a = d.workArea;
+    return x + width > a.x + 80 && x < a.x + a.width - 80 && y + 40 > a.y && y < a.y + a.height - 40;
+  });
+  return visible ? { x, y, width, height } : { width, height };
+}
+
+/** 记住窗口大小/位置/最大化状态；节流写入，避免拖动过程中反复落库 */
+function trackWindowState(win) {
+  let timer = null;
+  const save = () => {
+    if (!win || win.isDestroyed() || win.isMinimized()) return;
+    const maximized = win.isMaximized();
+    // 最大化时 getBounds 返回的是最大化后的尺寸，要存还原后的
+    const b = maximized ? win.getNormalBounds() : win.getBounds();
+    settings.windowState = { x: b.x, y: b.y, width: b.width, height: b.height, maximized };
+    user.setSetting('windowState', settings.windowState);
+  };
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(save, 400);
+  };
+  win.on('resize', schedule);
+  win.on('move', schedule);
+  win.on('maximize', schedule);
+  win.on('unmaximize', schedule);
+  win.on('close', () => {
+    clearTimeout(timer);
+    save();
+  });
+}
+
+function createMainWindow() {
+  const chrome = THEME_CHROME[settings.theme] || THEME_CHROME.paper;
+  const saved = sanitizeBounds(settings.windowState);
+  mainWin = new BrowserWindow({
+    width: saved?.width ?? 1220,
+    height: saved?.height ?? 820,
+    ...(saved?.x != null ? { x: saved.x, y: saved.y } : {}),
+    minWidth: 880,
+    minHeight: 600,
+    show: false,
+    backgroundColor: settings.theme === 'glass' ? '#0a0d12' : '#faf7f1',
+    icon: assetPath('icon.ico') || undefined,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { ...chrome, height: 60 },
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+    },
+  });
+
+  mainWin.loadFile(path.join(RENDERER, 'index.html'));
+  mainWin.once('ready-to-show', () => {
+    if (settings.windowState?.maximized) mainWin.maximize();
+    mainWin.show();
+  });
+  trackWindowState(mainWin);
+
+  mainWin.on('close', (e) => {
+    if (!quitting && settings.minimizeToTray) {
+      e.preventDefault();
+      mainWin.hide();
+    }
+  });
+  mainWin.on('closed', () => { mainWin = null; });
+
+  // 外链走系统浏览器，不在应用内打开
+  mainWin.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  return mainWin;
+}
+
+function createQuickWindow() {
+  quickWin = new BrowserWindow({
+    width: 580,
+    height: 460,
+    show: false,
+    frame: false,
+    resizable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    transparent: false,
+    icon: assetPath('icon.ico') || undefined,
+    backgroundColor: settings.theme === 'glass' ? '#0a0d12' : '#faf7f1',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+    },
+  });
+
+  quickWin.loadFile(path.join(RENDERER, 'quick.html'));
+  quickWin.setVisibleOnAllWorkspaces(true);
+
+  // 失焦即隐藏，像系统级取词工具
+  quickWin.on('blur', () => {
+    if (quickWin && quickWin.isVisible() && !quickWin.webContents.isDevToolsOpened()) quickWin.hide();
+  });
+  quickWin.on('closed', () => { quickWin = null; });
+  return quickWin;
+}
+
+/**
+ * 电影字幕悬浮窗。
+ *
+ * 无边框 + 透明 + 置顶，像播放器自带字幕那样摆在画面下方。
+ * 与悬浮查词窗的区别：它**不能失焦即隐藏**——看电影时焦点一定在播放器上，
+ * 那样会刚打开就消失。所以只能手动关或按热键关。
+ */
+function createSubtitleWindow() {
+  const saved = settings.subtitleBounds;
+  const area = screen.getPrimaryDisplay().workArea;
+  const width = Math.min(area.width - 80, Math.max(480, saved?.width || 900));
+  const height = Math.max(120, Math.min(420, saved?.height || 170));
+
+  subWin = new BrowserWindow({
+    width,
+    height,
+    // 默认摆在主屏底部居中，像字幕条
+    x: saved?.x ?? Math.round(area.x + (area.width - width) / 2),
+    y: saved?.y ?? Math.round(area.y + area.height - height - 60),
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    minWidth: 360,
+    minHeight: 110,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    // 全屏看视频时也要浮在上面。'screen-saver' 这一级才压得住全屏播放器
+    fullscreenable: false,
+    hasShadow: false,
+    icon: assetPath('icon.ico') || undefined,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+    },
+  });
+
+  subWin.loadFile(path.join(RENDERER, 'subtitle.html'));
+  subWin.setAlwaysOnTop(true, 'screen-saver');
+  subWin.setVisibleOnAllWorkspaces(true);
+
+  // 记住位置和大小，下次还摆在同一处
+  let saveTimer = null;
+  const saveBounds = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!subWin || subWin.isDestroyed()) return;
+      const b = subWin.getBounds();
+      settings.subtitleBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      user.setSetting('subtitleBounds', settings.subtitleBounds);
+    }, 400);
+  };
+  subWin.on('move', saveBounds);
+  subWin.on('resize', saveBounds);
+  subWin.on('closed', () => { subWin = null; });
+
+  return subWin;
+}
+
+/** 开/关字幕悬浮窗。热键与界面按钮都走这里 */
+function toggleSubtitleWindow(force = null) {
+  const want = force === null ? !(subWin && subWin.isVisible()) : force;
+
+  if (!want) {
+    if (subWin && !subWin.isDestroyed()) {
+      // 通知渲染层停掉采音，否则关了窗识别还在后台跑
+      subWin.webContents.send('sub:toggle', { on: false });
+      subWin.hide();
+    }
+    return false;
+  }
+
+  if (!subWin || subWin.isDestroyed()) createSubtitleWindow();
+  subWin.showInactive();   // 不抢焦点：看视频时焦点该留在播放器上
+  subWin.setAlwaysOnTop(true, 'screen-saver');
+  subWin.webContents.send('sub:toggle', { on: true, locked: false });
+  return true;
+}
+
+/**
+ * 显示悬浮查词窗。
+ * @param seen 初始查询词
+ * @param near 传了坐标就贴着鼠标弹（划词场景），否则摆在屏幕偏上方居中
+ */
+function showQuickWindow(seed, near = null) {
+  if (!quickWin) createQuickWindow();
+  const cursor = near && Number.isFinite(near.x) ? near : screen.getCursorScreenPoint();
+  const disp = screen.getDisplayNearestPoint(cursor);
+  const [w, h] = quickWin.getSize();
+  const area = disp.workArea;
+
+  let x;
+  let y;
+  if (near) {
+    // 贴着选区右下方弹，超出屏幕就翻到另一侧
+    x = cursor.x + 16;
+    y = cursor.y + 20;
+    if (x + w > area.x + area.width) x = cursor.x - w - 16;
+    if (y + h > area.y + area.height) y = cursor.y - h - 20;
+    x = Math.max(area.x, Math.min(x, area.x + area.width - w));
+    y = Math.max(area.y, Math.min(y, area.y + area.height - h));
+  } else {
+    x = Math.round(area.x + (area.width - w) / 2);
+    y = Math.round(area.y + area.height * 0.22);
+  }
+
+  quickWin.setPosition(Math.round(x), Math.round(y));
+  quickWin.show();
+  quickWin.focus();
+  quickWin.webContents.send('quick:open', { seed: seed || '' });
+}
+
+function toggleQuickWindow() {
+  if (quickWin && quickWin.isVisible()) {
+    quickWin.hide();
+    return;
+  }
+  // 剪贴板里若是一个英文单词，直接作为初始查询
+  let seed = '';
+  try {
+    const t = clipboard.readText().trim();
+    if (t && t.length <= 40 && /^[A-Za-z][A-Za-z '-]*$/.test(t)) seed = t;
+  } catch { /* 忽略 */ }
+  showQuickWindow(seed);
+}
+
+function focusMain(word) {
+  if (!mainWin) createMainWindow();
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
+  if (word) mainWin.webContents.send('nav:lookup', { word });
+}
+
+/* ========================================================================== */
+/*  托盘                                                                       */
+/* ========================================================================== */
+
+/**
+ * 图标资源查找。开发时在 assets/，打包后在 resources/app/assets/。
+ *
+ * 注意不能用 SVG data URL：nativeImage 不支持 SVG，createFromDataURL 会返回空图，
+ * 之前托盘图标就是因此一直空白。图标由 scripts/make-icon.js 预先栅格化成
+ * assets/tray.png 与 assets/icon.ico。
+ */
+function assetPath(name) {
+  const candidates = [
+    path.join(ROOT, 'assets', name),
+    path.join(__dirname, '..', '..', 'assets', name),
+    path.join(process.resourcesPath || '', 'app', 'assets', name),
+  ];
+  return candidates.find((p) => p && fs.existsSync(p)) || null;
+}
+
+function loadIcon(name) {
+  const p = assetPath(name);
+  if (!p) return null;
+  const img = nativeImage.createFromPath(p);
+  return img.isEmpty() ? null : img;
+}
+
+function trayIcon() {
+  const img = loadIcon('tray.png') || loadIcon('icon.ico');
+  if (img) return img;
+  // 兜底：画一个纯色方块，至少不是空白（空图会让托盘图标不可见）
+  console.warn('[tray] 找不到图标资源，使用纯色兜底；请运行 npm run icon');
+  const size = 32;
+  const buf = Buffer.alloc(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    buf[i * 4 + 0] = 0x2f; // B
+    buf[i * 4 + 1] = 0x40; // G
+    buf[i * 4 + 2] = 0xb3; // R
+    buf[i * 4 + 3] = 0xff; // A
+  }
+  return nativeImage.createFromBuffer(buf, { width: size, height: size });
+}
+
+/**
+ * 重建托盘菜单。热键可能在启动时被自动更换（见 registerHotkey），
+ * 所以菜单要在热键确定之后再刷一次，否则菜单里写的是旧热键。
+ */
+function refreshTrayMenu() {
+  if (!tray) return;
+  const label = settings.hotkeyEnabled && settings.hotkey
+    ? `悬浮查词（${settings.hotkey}）`
+    : '悬浮查词';
+  tray.setToolTip(`Lexica 离线词典 · ${label}`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开主窗口', click: () => focusMain() },
+    { label, click: () => showQuickWindow() },
+    { type: 'separator' },
+    { label: '今日待复习', click: () => { focusMain(); mainWin?.webContents.send('nav:view', { view: 'review' }); } },
+    { label: '生词本', click: () => { focusMain(); mainWin?.webContents.send('nav:view', { view: 'wordbook' }); } },
+    { type: 'separator' },
+    {
+      label: `视频字幕悬浮窗　${settings.subtitleHotkey || ''}`,
+      type: 'checkbox',
+      checked: !!(subWin && !subWin.isDestroyed() && subWin.isVisible()),
+      click: () => { toggleSubtitleWindow(); refreshTrayMenu(); },
+    },
+    { type: 'separator' },
+    { label: '退出 Lexica', click: () => { quitting = true; app.quit(); } },
+  ]));
+}
+
+function buildTray() {
+  tray = new Tray(trayIcon());
+  refreshTrayMenu();
+  tray.on('click', () => (mainWin && mainWin.isVisible() ? mainWin.hide() : focusMain()));
+}
+
+/* ========================================================================== */
+/*  全局热键                                                                   */
+/* ========================================================================== */
+
+/**
+ * 注册全局热键。用户明确设过就只试那一个（失败要如实告知），
+ * 若用的还是默认值，则在候选表里顺序找一个能用的。
+ */
+function registerHotkey({ allowFallback = false } = {}) {
+  globalShortcut.unregisterAll();
+  if (!settings.hotkeyEnabled || !settings.hotkey) return { ok: true, registered: false };
+
+  const tryOne = (accel) => {
+    try {
+      return globalShortcut.register(accel, toggleQuickWindow);
+    } catch {
+      return false;
+    }
+  };
+
+  /* 附属热键必须在主热键之前注册。
+     以前这段写在 `if (tryOne(主热键)) return` 的**后面**，
+     而主热键正常都能注册成功，于是这段是死代码——
+     「按热键划词」模式一直没生效过。 */
+  const registerExtra = (accel, fn) => {
+    if (!accel) return;
+    try { globalShortcut.register(accel, fn); } catch { /* 被占用就算了，不影响主热键 */ }
+  };
+
+  // 划词热键：按下就抓当前选区
+  if (settings.selectionMode === 'hotkey') {
+    registerExtra(settings.selectionHotkey, () => {
+      setupSelection();
+      selection.setCopyFallback(settings.selectionCopyFallback !== false);
+      selection.capture();
+    });
+  }
+
+  /* 视频字幕热键。这个尤其需要全局热键：字幕锁定成鼠标穿透后，
+     窗口自己点不到了，只能靠热键关。 */
+  registerExtra(settings.subtitleHotkey, () => toggleSubtitleWindow());
+
+  if (tryOne(settings.hotkey)) return { ok: true, registered: true, hotkey: settings.hotkey };
+
+  if (allowFallback) {
+    for (const alt of HOTKEY_FALLBACKS) {
+      if (alt === settings.hotkey) continue;
+      if (tryOne(alt)) {
+        settings.hotkey = alt;
+        user.setSetting('hotkey', alt);
+        return { ok: true, registered: true, hotkey: alt, fellBack: true };
+      }
+    }
+  }
+
+  return { ok: false, registered: false, reason: '热键已被其它程序占用', hotkey: settings.hotkey };
+}
+
+/* ========================================================================== */
+/*  剪贴板取词                                                                 */
+/* ========================================================================== */
+
+/**
+ * 轮询剪贴板，内容变成英文单词/短语时自动弹出悬浮查词窗。
+ *
+ * 真正的鼠标悬停划词需要 UI Automation / 无障碍接口，得编原生模块，
+ * 本机没有 MSVC 编不了，所以走剪贴板这条路：用户按 Ctrl+C 就能取词。
+ */
+/* 这里的四词上限是刻意保留的，不是漏改。
+   划词取词是用户主动按热键，长句照样受理（见 selection.js）；
+   而剪贴板监听是「复制即弹窗」，复制一整段就自动弹出词典会非常扰人。 */
+function looksLikeLookupText(t) {
+  if (!t || t.length > 48) return false;
+  if (!/^[A-Za-z][A-Za-z '’\-]*$/.test(t)) return false;
+  return t.split(/\s+/).length <= 4;
+}
+
+function startClipboardWatch() {
+  stopClipboardWatch();
+  try { lastClip = clipboard.readText(); } catch { lastClip = ''; }
+  clipTimer = setInterval(() => {
+    let t;
+    try { t = clipboard.readText().trim(); } catch { return; }
+    if (!t || t === lastClip) return;
+    lastClip = t;
+    if (!looksLikeLookupText(t)) return;
+    // 主窗口正在前台时不打扰，用户本来就能直接查
+    if (mainWin && !mainWin.isMinimized() && mainWin.isFocused()) return;
+    showQuickWindow(t);
+  }, 600);
+}
+
+function stopClipboardWatch() {
+  if (clipTimer) clearInterval(clipTimer);
+  clipTimer = null;
+}
+
+/* ========================================================================== */
+/*  划词取词                                                                   */
+/* ========================================================================== */
+
+/** 自己的窗口在前台时不取词，否则在应用里选个词就会自弹 */
+function ourWindowFocused() {
+  return BrowserWindow.getAllWindows().some((w) => !w.isDestroyed() && w.isFocused());
+}
+
+function setupSelection() {
+  if (selection) return;
+  selection = new SelectionWatcher();
+
+  selection.on('selection', (e) => {
+    // 自动模式下要避开自己的窗口；热键模式是用户主动按的，照查不误
+    if (!e.requested && ourWindowFocused()) return;
+    showQuickWindow(e.text, { x: e.x, y: e.y });
+  });
+
+  selection.on('empty', () => {
+    // 热键按了但没选中东西：把悬浮窗开着让用户手输，比什么都不发生好
+    showQuickWindow('');
+  });
+
+  selection.on('disabled', () => {
+    settings.selectionMode = 'off';
+    user.setSetting('selectionMode', 'off');
+    broadcast('selection:disabled', {});
+  });
+}
+
+function applySelectionMode() {
+  const mode = settings.selectionMode || 'off';
+  if (mode === 'off') {
+    selection?.stop();
+    return;
+  }
+  setupSelection();
+  selection.setCopyFallback(settings.selectionCopyFallback !== false);
+  selection.setWatch(mode === 'auto');
+}
+
+/* ========================================================================== */
+/*  IPC                                                                        */
+/* ========================================================================== */
+
+function registerIpc() {
+  const handle = (channel, fn) => ipcMain.handle(channel, (_e, ...args) => {
+    try {
+      return fn(...args);
+    } catch (err) {
+      console.error(`[ipc:${channel}]`, err);
+      return { __error: err.message };
+    }
+  });
+
+  /* ---- 词典 ---- */
+  handle('dict:stats', () => ({
+    ...dict.stats(),
+    counts: user.counts(),
+    settings,
+    customCount: user.customCount(),
+    mtAvailable: !!translator?.available,
+    // 设置页要按「装了哪些模型」来渲染选项，没装的不该给出来
+    mtModels: translator ? translator.installedModels() : [],
+    asr: asr ? asr.status() : { available: false, models: [] },
+    appVersion: app.getVersion(),
+  }));
+
+  /**
+   * 把用户自建词条包装成和内置词条一样的结构，
+   * 这样渲染层不用为它写第二套逻辑。
+   */
+  const customAsEntry = (row) => ({
+    id: -1,
+    word: row.word,
+    wkey: row.word,
+    isCustom: true,
+    note: row.note || null,
+    lemmaOf: null,
+    weak: false,
+    phon: row.phonetic ? { main: row.phonetic, variants: [], us: null } : null,
+    phonetic: row.phonetic || null,
+    translation: require('./dict-db').parseTranslation(row.translation),
+    translationRaw: row.translation,
+    definition: [],
+    posRatio: [],
+    forms: [],
+    tags: [],
+    collins: 0,
+    oxford: false,
+    bnc: 0,
+    frq: 0,
+    rank: 999999,
+    senses: [],
+    examples: [],
+    examplesByPos: {},
+    relations: { synonyms: [], antonyms: [], hypernyms: [], hyponyms: [] },
+    etym: null,
+    quotes: [],
+    confusables: [],
+  });
+
+  handle('dict:lookup', (word, opts) => {
+    // 自定义词条优先：用户特意补的词，说明内置词库没有或不满意
+    const custom = user.customEntry(word);
+    if (custom) {
+      if (!opts?.noHistory) user.pushHistory(custom.word);
+      const built = dict.lookup(word);
+      return {
+        status: 'ok',
+        entry: customAsEntry(custom),
+        // 内置词库里也有的话，一并告知，让用户能切过去看
+        alsoBuiltin: built.status === 'ok' ? built.entry.word : null,
+        saved: user.isSaved(custom.word),
+        mine: user.entry(custom.word),
+        corrections: [],
+        weak: false,
+      };
+    }
+
+    const res = dict.lookup(word);
+    if (res.status === 'ok') {
+      if (!opts?.noHistory) user.pushHistory(res.entry.word);
+      res.saved = user.isSaved(res.entry.word);
+      // 生词本上的笔记与自有释义是叠加的，词条页要单独排一块
+      res.mine = user.entry(res.entry.word);
+    }
+    return res;
+  });
+
+  handle('dict:suggest', (q, limit) => {
+    const res = dict.suggest(q, limit);
+    // 自建词条排在最前面：用户自己录的，优先级最高
+    const mine = user.customPrefix(q, 5);
+    if (mine.length) {
+      res.groups.unshift({
+        kind: 'custom',
+        title: '我的词条',
+        items: mine.map((r) => ({
+          word: r.word,
+          phonetic: r.phonetic,
+          brief: r.translation.slice(0, 60),
+          tags: [],
+          collins: 0,
+          oxford: false,
+        })),
+      });
+    }
+    return res;
+  });
+  handle('dict:search', (q, limit) => dict.search(q, limit));
+  handle('dict:random', () => dict.randomWord());
+  handle('dict:terms', (text) => dict.termsIn(text));
+
+  /* ---- 生词本 ---- */
+  handle('wb:toggle', (word) => {
+    const r = user.toggle(word);
+    broadcast('wb:changed', user.counts());
+    return r;
+  });
+  handle('wb:isSaved', (word) => user.isSaved(word));
+  handle('wb:list', (opts) => {
+    // 补上中文释义与难度标签，生词本列表才有内容可看。
+    // 用 briefMany 一次批量取：逐个 lookup() 会连义项、例句、词源一起查出来，
+    // 而列表只用得上音标和前两条释义。
+    const rows = user.list(opts);
+    const brief = dict.briefMany(rows.map((r) => r.word));
+    return rows.map((row) => {
+      const b = brief.get(String(row.word).toLowerCase());
+      const mine = user.customEntry(row.word);
+      return {
+        ...row,
+        myDef: row.my_def || null,
+        phonetic: b?.phonetic || mine?.phonetic || null,
+        /* 列表只有一行位置，优先给自己写的——那是用户特意记下来的，
+           而词库释义在词条页随时能看到。 */
+        brief: row.my_def || b?.brief || mine?.translation || '',
+        /* 词库里到底有没有这个词，界面要能区分：
+           自己加的词组点进去是没有词条页的，得给不同的提示。 */
+        inDict: !!b,
+        tags: b?.tags.map((t) => t.code) || [],
+        collins: b?.collins || 0,
+      };
+    });
+  });
+
+  /** 单条生词本记录（编辑框要用），连词库摘要一起给 */
+  handle('wb:get', (word) => {
+    const row = user.entry(word);
+    const b = dict.briefMany([word]).get(String(word || '').toLowerCase());
+    return {
+      row: row || null,
+      saved: !!row,
+      dictBrief: b?.brief || null,
+      phonetic: b?.phonetic || null,
+      inDict: !!b,
+    };
+  });
+
+  /** 手动添加。词库里没有的词组只能走这条路进生词本 */
+  handle('wb:add', (payload) => {
+    const r = user.addWord(payload?.word, { note: payload?.note, myDef: payload?.myDef });
+    if (r.ok) broadcast('wb:changed', user.counts());
+    return r;
+  });
+
+  /** 写/改注释（笔记 + 我的释义） */
+  handle('wb:annotate', (payload) => {
+    const r = user.annotate(payload?.word, { note: payload?.note, myDef: payload?.myDef });
+    if (r.ok) broadcast('wb:changed', user.counts());
+    return r;
+  });
+
+  handle('wb:remove', (word) => {
+    const r = user.remove(word);
+    broadcast('wb:changed', user.counts());
+    return r;
+  });
+  handle('wb:counts', () => user.counts());
+  handle('wb:due', (limit) => {
+    return user.dueQueue(limit).map((row) => {
+      const r = dict.lookup(row.word, { noHistory: true });
+      /* 自己加的词组词库里查不到，entry 会是 null。
+         这时用自建词条兜一层，否则复习卡上一个字都没有，卡片没法答。 */
+      let entry = r.status === 'ok' ? r.entry : null;
+      if (!entry) {
+        const mine = user.customEntry(row.word);
+        if (mine) entry = customAsEntry(mine);
+      }
+      return { card: row, entry, myDef: row.my_def || null, note: row.note || null };
+    });
+  });
+  handle('wb:grade', (word, grade) => {
+    const r = user.grade(word, grade);
+    broadcast('wb:changed', user.counts());
+    return r;
+  });
+
+  handle('wb:export', async (format) => {
+    const words = user.allWords();
+    if (!words.length) return { ok: false, reason: '生词本还是空的' };
+
+    const isAnki = format === 'anki';
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
+      title: isAnki ? '导出为 Anki 可导入的 TSV' : '导出为 CSV',
+      defaultPath: `lexica-wordbook-${new Date().toISOString().slice(0, 10)}.${isAnki ? 'tsv' : 'csv'}`,
+      filters: isAnki ? [{ name: 'TSV', extensions: ['tsv'] }] : [{ name: 'CSV', extensions: ['csv'] }],
+    });
+    if (canceled || !filePath) return { ok: false, reason: '已取消' };
+
+    const esc = (s) => {
+      const v = String(s ?? '');
+      return isAnki ? v.replace(/[\t\n\r]+/g, ' ') : `"${v.replace(/"/g, '""')}"`;
+    };
+    const sep = isAnki ? '\t' : ',';
+    const lines = [];
+    if (!isAnki) {
+      lines.push(['单词', '音标', '释义', '我的释义', '我的笔记', '例句', '难度标签', '加入时间', '复习次数']
+        .map(esc).join(sep));
+    }
+
+    for (const w of words) {
+      const r = dict.lookup(w.word, { noHistory: true });
+      const e = r.status === 'ok' ? r.entry : null;
+      const mine = e ? null : user.customEntry(w.word);
+      const dictMean = e
+        ? e.translation.map((t) => (t.pos ? `${t.pos}. ${t.text}` : t.text)).join(isAnki ? '<br>' : '；')
+        : (mine?.translation || '');
+      const ex = e?.examples?.[0] ? `${e.examples[0].en}${e.examples[0].zh ? (isAnki ? '<br>' : ' ') + e.examples[0].zh : ''}` : '';
+      /* Anki 那边列数固定（正面/背面…），自己写的内容拼进背面，
+         不能多加两列——多了导入时字段会错位。 */
+      const anki = [
+        w.word,
+        e?.phonetic || mine?.phonetic || '',
+        [w.my_def, dictMean, w.note && `【笔记】${w.note}`].filter(Boolean).join('<br>'),
+        ex,
+        (e?.tags || []).map((t) => t.label).join(' '),
+        new Date(w.added_at).toISOString().slice(0, 10),
+        w.reps,
+      ];
+      const csv = [
+        w.word,
+        e?.phonetic || mine?.phonetic || '',
+        dictMean,
+        w.my_def || '',
+        w.note || '',
+        ex,
+        (e?.tags || []).map((t) => t.label).join(' '),
+        new Date(w.added_at).toISOString().slice(0, 10),
+        w.reps,
+      ];
+      lines.push((isAnki ? anki : csv).map(esc).join(sep));
+    }
+
+    // Excel 打开 CSV 需要 BOM 才能正确识别 UTF-8
+    fs.writeFileSync(filePath, (isAnki ? '' : '﻿') + lines.join('\r\n'), 'utf8');
+    return { ok: true, filePath, count: words.length };
+  });
+
+  handle('wb:revealExport', (p) => { if (p) shell.showItemInFolder(p); });
+
+  /* ---- 考纲练习 ---- */
+  handle('drill:scopes', () =>
+    quiz.scopes().map((s) => ({ ...s, progress: user.scopeProgress(s.scope) })),
+  );
+  handle('drill:progress', (scope) => user.scopeProgress(scope));
+  handle('drill:study', (scope, count) => quiz.studyBatch(scope, count));
+  handle('drill:quiz', (scope, count, kinds) => quiz.batch(scope, count, { kinds }));
+  handle('drill:assess', (scope, count) => quiz.assessmentBatch(scope, count));
+
+  handle('drill:answer', (payload) => {
+    user.recordAnswer(payload);
+    return { ok: true };
+  });
+
+  handle('drill:finish', (payload) => {
+    user.saveSession(payload);
+    return user.scopeProgress(payload.scope);
+  });
+
+  handle('drill:mark', (word, scope, known) => {
+    user.markWord(word, scope, known);
+    // 标记为不认识的词直接进生词本，省一步操作
+    if (!known && !user.isSaved(word)) {
+      user.toggle(word);
+      broadcast('wb:changed', user.counts());
+    }
+    return { ok: true, saved: user.isSaved(word) };
+  });
+
+  handle('drill:weak', (scope, limit) => {
+    const rows = user.weakWords(scope, limit);
+    return rows.map((r) => {
+      const res = dict.lookup(r.word, { noHistory: true });
+      return { ...r, entry: res.status === 'ok' ? res.entry : null };
+    });
+  });
+
+  /** 错题重练：拿错得最多的词现场出题 */
+  handle('drill:weakQuiz', (scope, count) => {
+    const rows = user.weakWords(scope, count * 3);
+    const out = [];
+    for (const r of rows) {
+      if (out.length >= count) break;
+      const row = dict.q.exact.get(String(r.word).toLowerCase());
+      if (!row) continue;
+      for (const kind of ['en2zh', 'zh2en', 'cloze']) {
+        const q = quiz.makeQuestion(scope, row, kind);
+        if (q) { out.push(q); break; }
+      }
+    }
+    return out;
+  });
+
+  handle('drill:labels', () => ({ scopes: SCOPE_LABELS, kinds: KIND_LABELS }));
+  handle('drill:checkSpell', (input, answer) => checkSpelling(input, answer));
+
+  /** 导出练习进度：范围汇总 + 错题明细，一份 CSV */
+  handle('drill:export', async (onlyScope) => {
+    const scopes = quiz.scopes().filter((s) => !onlyScope || s.scope === onlyScope);
+    if (!scopes.length) return { ok: false, reason: '没有可导出的范围' };
+
+    const name = onlyScope ? `lexica-${onlyScope}` : 'lexica-练习进度';
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
+      title: '导出练习进度',
+      defaultPath: `${name}-${new Date().toISOString().slice(0, 10)}.csv`,
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+    });
+    if (canceled || !filePath) return { ok: false, reason: '已取消' };
+
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [];
+    let weakTotal = 0;
+
+    lines.push('# 范围汇总');
+    lines.push(['范围', '可练词量', '已掌握', '待巩固', '累计答题', '正确率', '上次检测掌握率', '检测时间']
+      .map(esc).join(','));
+
+    for (const s of scopes) {
+      const p = user.scopeProgress(s.scope);
+      lines.push([
+        s.label,
+        s.quizzable,
+        p.mastered,
+        p.shaky,
+        p.answered,
+        p.accuracy == null ? '' : `${Math.round(p.accuracy * 100)}%`,
+        p.lastAssessment ? `${Math.round(p.lastAssessment.rate * 100)}%` : '',
+        p.lastAssessment ? new Date(p.lastAssessment.at).toLocaleString('zh-CN') : '',
+      ].map(esc).join(','));
+    }
+
+    lines.push('');
+    lines.push('# 错题明细');
+    lines.push(['范围', '单词', '音标', '释义', '答题次数', '答对', '答错', '难度标签']
+      .map(esc).join(','));
+
+    for (const s of scopes) {
+      for (const w of user.weakWords(s.scope, 500)) {
+        const r = dict.lookup(w.word, { noHistory: true });
+        const e = r.status === 'ok' ? r.entry : null;
+        lines.push([
+          s.label,
+          w.word,
+          e?.phon?.main || '',
+          e ? e.translation.map((t) => (t.pos ? `${t.pos}. ${t.text}` : t.text)).join('；') : '',
+          w.seen,
+          w.hit,
+          w.miss,
+          (e?.tags || []).map((t) => t.label).join(' '),
+        ].map(esc).join(','));
+        weakTotal++;
+      }
+    }
+
+    // Excel 打开 CSV 需要 BOM 才能认出 UTF-8
+    fs.writeFileSync(filePath, `﻿${lines.join('\r\n')}`, 'utf8');
+    return { ok: true, filePath, scopes: scopes.length, weak: weakTotal };
+  });
+
+  /* ---- 学习统计 ---- */
+  handle('stats:heatmap', (days) => user.heatmap(days));
+
+  /* ---- 历史 ---- */
+  handle('hist:recent', (limit) => user.recent(limit));
+  handle('hist:clear', () => { user.clearHistory(); return { ok: true }; });
+
+  /* ---- 设置 ---- */
+  handle('set:all', () => settings);
+  handle('set:put', (patch) => {
+    const before = { ...settings };
+    Object.assign(settings, patch);
+    for (const [k, v] of Object.entries(patch)) user.setSetting(k, v);
+
+    if (patch.theme && patch.theme !== before.theme) {
+      const chrome = THEME_CHROME[patch.theme] || THEME_CHROME.paper;
+      try { mainWin?.setTitleBarOverlay({ ...chrome, height: 60 }); } catch { /* 忽略 */ }
+      broadcast('set:theme', { theme: patch.theme });
+    }
+
+    let hk = null;
+    if (patch.hotkey !== undefined || patch.hotkeyEnabled !== undefined) {
+      hk = registerHotkey();
+      refreshTrayMenu();
+    }
+
+    if (patch.autoLaunch !== undefined) {
+      app.setLoginItemSettings({ openAtLogin: !!patch.autoLaunch, args: ['--hidden'] });
+    }
+    if (patch.selectionMode !== undefined || patch.selectionCopyFallback !== undefined) {
+      applySelectionMode();
+      // 划词热键跟着模式变，要重新注册
+      if (patch.selectionMode !== undefined) registerHotkey();
+    }
+    if (patch.selectionHotkey !== undefined) registerHotkey();
+    if (patch.subtitleHotkey !== undefined) registerHotkey();
+
+    if (patch.subtitleFontScale !== undefined || patch.subtitleLines !== undefined) {
+      // 悬浮窗自己读设置，通知它重绘一次
+      if (subWin && !subWin.isDestroyed()) subWin.webContents.send('sub:toggle', { on: true });
+    }
+
+    if (patch.clipboardLookup !== undefined) {
+      if (patch.clipboardLookup) startClipboardWatch();
+      else stopClipboardWatch();
+    }
+
+    if (patch.mtModel !== undefined) {
+      /* 换模型不用重启工作进程：它按 key 缓存了多个 pipeline。
+         回写 settings 是因为 setModel 会拒绝没装的模型，
+         不同步的话设置页会显示一个其实没生效的选项。 */
+      settings.mtModel = translator.setModel(patch.mtModel);
+      user.setSetting('mtModel', settings.mtModel);
+      if (translator.available) translator.warmup();
+      /* 术语表探到的错译写法是**上一个模型**给的，换了模型就得重探。
+         不清的话新模型的错法一条都没有，术语表静默失效。
+         已有的写法会保留（探测是并集），所以旧模型的配置不会丢。 */
+      resetTermProbes();
+    }
+
+    if ((patch.asrModel !== undefined || patch.asrPrompt !== undefined) && asr.status().running) {
+      // 正在记录时换模型或改提示词：重启服务，音频队列继续往里送
+      const prompt = [lectures.info()?.title ? `Lecture: ${lectures.info().title}.` : '',
+        settings.asrPrompt || ''].filter(Boolean).join(' ').trim();
+      asr.start(settings.asrModel, { prompt })
+        .catch((e) => console.error('[asr] 重启失败：', e.message));
+    }
+
+    return { settings, hotkey: hk };
+  });
+
+  /* ================================================================== */
+  /*  术语表：在机器翻译的输出上做一层用户可控的修正                      */
+  /* ================================================================== */
+
+  /**
+   * 整张术语表缓存在内存里。
+   *
+   * 每译一句都要拿全表来匹配，走数据库的话一节课几百句就是几百次全表扫描。
+   * 条目上限 2000 条，全读出来也就几百 KB。改动走 gloss:* 那几个 handler，
+   * 都会顺手把缓存清掉，所以不存在读到旧数据的窗口。
+   */
+  let glossCache = null;
+  const glossRows = () => (glossCache ||= user.glossary());
+  const glossInvalidate = () => { glossCache = null; };
+
+  /** 这个会话里已经探测过的术语，避免模型报错时反复重试 */
+  const probedThisRun = new Set();
+
+  /** 框架句对照的译文只用算一次，整个会话复用 */
+  let probeCtrlZh = null;
+  async function probeControl() {
+    if (probeCtrlZh !== null) return probeCtrlZh;
+    const r = await translator.translate(PROBE_FRAME(PROBE_CONTROL));
+    probeCtrlZh = r?.ok ? r.text : '';
+    return probeCtrlZh;
+  }
+
+  /**
+   * 问模型「它把这个术语译成什么」，结果落库。
+   *
+   * 三种问法全用、结果取并集，因为实测**模型对同一术语的错译不是固定的**：
+   *   A 裸术语       replay buffer          → 重放缓冲    对上句子里的 2/8
+   *   B 带冠词       the replay buffer      → 重放缓冲    2/8
+   *   C 框架句做差   We use the X. 减对照   → 重播缓冲    5/8
+   * 并集 6/8。只用 A（最初的做法）八条里只有两条真能生效。
+   * 剩下两条对不上的其中一条根本修不了：scalar reward 被整段译成「一笔奖金」，
+   * 术语在译文里压根没出现，任何替换都无从下手。
+   * 数据出处：scripts/probe-glossary-carriers.js
+   *
+   * 故意不 await 在字幕链路上：探一条要三四秒，实时字幕等不起。
+   * 探测期间该术语不生效，探完之后的句子才生效。
+   */
+  async function probeTerms(rows) {
+    if (!translator?.available) return false;
+    let changed = false;
+    for (const r of rows) {
+      if (probedThisRun.has(r.term)) continue;
+      probedThisRun.add(r.term);
+      const term = r.surface || r.term;
+      const forms = new Set();
+      try {
+        for (const text of [term, `the ${term}`]) {
+          const out = await translator.translate(text);
+          const f = out?.ok ? cleanProbe(out.text) : null;
+          if (f) forms.add(f);
+        }
+        const [frame, ctrl] = [await translator.translate(PROBE_FRAME(term)), await probeControl()];
+        if (frame?.ok && ctrl) {
+          const f = cleanProbe(diffMiddle(frame.text, ctrl));
+          // 差异段里混进了框架自己的字就不能要，详见 frameDiffOk
+          if (f && frameDiffOk(f, ctrl)) forms.add(f);
+        }
+      } catch { /* 探测失败不影响翻译本身 */ }
+
+      /* 一个也没拿到就不写库：写了会让 needProbe 以为问过了，
+         而实际上是模型那次出错，下次启动还该再问一遍。 */
+      if (!forms.size) continue;
+      /* 与已有的并集，不是覆盖：两个翻译模型（opus / nllb）错得不一样，
+         用户在设置里换模型后会探到新写法，旧的仍然要留着。
+         反正替换要过「英文原文里必须出现这个术语」那道门槛，多存不危险。 */
+      const merged = [...new Set([...(r.wrong || []), ...forms])];
+      user.setTermWrong(r.term, merged);
+      r.wrong = merged;
+      changed = true;
+    }
+    if (changed) glossInvalidate();
+    return changed;
+  }
+
+  /**
+   * 对一条「英文 → 机器译文」应用术语表。
+   *
+   * @returns 修正后的译文（没有术语表或没命中时原样返回）
+   */
+  function fixTerms(en, zh) {
+    if (!zh) return zh;
+    const rows = glossRows();
+    if (!rows.length) return zh;
+
+    const hits = matchTerms(en, rows);
+    if (!hits.length) return zh;
+
+    const r = applyGlossary(zh, hits);
+    if (r.applied.length) {
+      // 让用户能在术语表里看出哪几条真的在起作用
+      const counts = {};
+      for (const a of r.applied) {
+        const row = hits.find((h) => (h.surface || h.term) === a.term);
+        if (row) counts[row.term] = (counts[row.term] || 0) + 1;
+      }
+      try { user.bumpTermHits(counts); } catch { /* 计数失败无所谓 */ }
+    }
+
+    /* 还没问过模型的，后台补上，下一句就能生效。
+     *
+     * 但记录进行中绝不探测：探测本身要跑一次模型，而实测翻译进程和 whisper
+     * 会抢 CPU（一节课只识别出四分之一那次就是这么来的）。上课时插进来几十次
+     * 额外推理，代价是丢字幕——换来的只是某个术语早几分钟生效。
+     * 加术语那一刻已经探过了，这里只是补漏。 */
+    if (!lectures?.active) {
+      const todo = needProbe(hits);
+      if (todo.length) probeTerms(todo).catch(() => {});
+    }
+
+    return r.text;
+  }
+
+  handle('gloss:all', () => user.glossary());
+  handle('gloss:put', (entry) => {
+    const r = user.putTerm(entry);
+    if (!r.ok) return r;
+    glossInvalidate();
+    /* 新加的条目立刻探测。这时用户在设置页，不是在等字幕，
+       花一秒换来「加完就能用」，比留到第一次命中时才探要好。 */
+    probedThisRun.delete(r.term);
+    const row = user.glossary().find((x) => x.term === r.term);
+    if (row) probeTerms([row]).catch(() => {});
+    return r;
+  });
+  handle('gloss:delete', (term) => { const r = user.deleteTerm(term); glossInvalidate(); return r; });
+  handle('gloss:import', async ({ text, replace } = {}) => {
+    /* 覆盖导入会清空用户手打的全部术语，且没有撤销。
+       用原生对话框而不是渲染层的 confirm：和「恢复备份」保持一致，
+       而且 Electron 里 window.confirm 会阻塞渲染进程。 */
+    if (replace && user.glossaryCount() > 0) {
+      const { response } = await dialog.showMessageBox(mainWin, {
+        type: 'warning',
+        buttons: ['取消', '清空并导入'],
+        defaultId: 0,
+        cancelId: 0,
+        title: '覆盖导入术语表',
+        message: `这会先删掉现有的 ${user.glossaryCount()} 条术语`,
+        detail: '删掉的条目无法恢复。如果只是想加新的，请用「追加导入」。',
+      });
+      if (response !== 1) return { ok: false, reason: '已取消' };
+    }
+    const r = user.importGlossary(text, { replace });
+    if (r.ok) {
+      glossInvalidate();
+      resetTermProbes();
+      // 导入可能是几十条，全部探完要几十秒，放后台慢慢跑
+      probeTerms(user.glossary()).catch(() => {});
+    }
+    return r;
+  });
+  /** 让所有术语重新进入「待探测」状态。换翻译模型后必须调一次 */
+  function resetTermProbes() {
+    probedThisRun.clear();
+    probeCtrlZh = null;   // 对照译文是上一个模型给的，换了模型就不能再用
+  }
+
+  /** 手动重探：换了翻译模型之后用得上 */
+  handle('gloss:reprobe', async () => {
+    if (!translator?.available) return { ok: false, reason: '未安装翻译模型' };
+    resetTermProbes();
+    await probeTerms(user.glossary());
+    return { ok: true, terms: user.glossary() };
+  });
+
+  /* ---- 机器翻译兜底 ---- */
+  handle('mt:status', () => ({
+    available: !!translator?.available,
+    // 模型质量在术语上不可靠，界面要如实提示，别让人当成词典释义
+    caveat: '机器翻译，专业术语可能不准',
+  }));
+
+  ipcMain.handle('mt:translate', async (_e, text) => {
+    if (!translator) return { ok: false, reason: '翻译模块未初始化' };
+    const r = await translator.translate(text);
+    return r?.ok ? { ...r, text: fixTerms(text, r.text) } : r;
+  });
+
+  /**
+   * 整段翻译。逐句进度回推给发起请求的那个窗口——
+   * 一段话要好几秒，界面得能一句句显示，不然只能干等。
+   */
+  ipcMain.handle('mt:translateLong', async (e, text, token) => {
+    if (!translator) return { ok: false, reason: '翻译模块未初始化' };
+    const wc = e.sender;
+    const r = await translator.translateLong(text, (p) => {
+      // 期间窗口可能已经关了
+      if (!wc.isDestroyed()) wc.send('mt:progress', { token, ...p });
+    });
+    if (!r?.ok || !r.sentences) return r;
+    /* 按句修而不是对整段修：术语表的门槛是「英文原文里出现过」，
+       逐句对照才能保证改的是对应那一句，否则 A 句的术语会去改 B 句的字。 */
+    const sentences = r.sentences.map((x) => ({ ...x, out: fixTerms(x.src, x.out) }));
+    return { ...r, sentences, text: sentences.map((x) => x.out).join('') };
+  });
+
+  /* ---- 每日目标 ---- */
+  /* ================================================================== */
+  /*  实时字幕（上课听写 + 双语记录）                                    */
+  /* ================================================================== */
+
+  /**
+   * 整条流水线放在主进程，渲染层只负责采音。
+   *
+   * 这样做的理由：识别与翻译都是长耗时的跨进程调用，放渲染层的话
+   * 界面一刷新（或者用户不小心 Ctrl+R）正在进行的一节课就断了；
+   * 而且落盘要在主进程做，中间再倒一手只是多一层出错的地方。
+   */
+  const lec = {
+    /** 待识别的音频队列。识别是串行的，堆积过多说明机器跟不上 */
+    queue: [],
+    busy: false,
+    dropped: 0,
+    lagWarned: false,
+  };
+
+  /* 字幕事件要同时发给主窗口和悬浮窗：两边都可能在显示同一条流水线的结果
+     （课堂页在看历史、悬浮窗在放电影字幕），漏一个就有一边不动。 */
+  const lecSend = (channel, payload) => {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, payload);
+    if (subWin && !subWin.isDestroyed()) subWin.webContents.send(channel, payload);
+  };
+
+  handle('asr:status', () => ({
+    ...asr.status(),
+    mtModels: translator.installedModels(),
+    mtModel: translator.model,
+    maxChunkSec: LECTURE_MAX_CHUNK_SEC,
+    silenceMs: settings.lectureSilenceMs,
+    recording: lectures.active,
+    session: lectures.info(),
+  }));
+
+  handle('lec:start', async ({ title, source, sourceLabel } = {}) => {
+    if (lectures.active) return { ok: false, reason: '已经在记录了' };
+    if (!asr.available) {
+      return { ok: false, reason: '没有安装语音识别组件，请先运行 npm run fetch:asr' };
+    }
+
+    const modelKey = asr.installedModels().some((m) => m.key === settings.asrModel)
+      ? settings.asrModel : (asr.installedModels()[0]?.key || 'base');
+
+    /* 课程名拼在提示词前面：课程名里往往就有最关键的领域词
+       （"Reinforcement Learning"、"Organic Chemistry"），
+       让 whisper 知道这节课在讲什么，同音词的选择会明显准一些。 */
+    const prompt = [title ? `Lecture: ${title}.` : '', settings.asrPrompt || '']
+      .filter(Boolean).join(' ').trim();
+
+    try {
+      await asr.start(modelKey, { prompt });
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+
+    lec.queue.length = 0;
+    lec.busy = false;
+    lec.dropped = 0;
+    lec.lagWarned = false;
+
+    /* 记录期间临时切到实时专用的翻译模型，停止时切回来。
+       两个模型在工作进程里各自缓存，来回切不会重新加载。 */
+    lec.prevMtModel = translator.model;
+    if (settings.lectureMtModel && settings.lectureMtModel !== translator.model) {
+      translator.setModel(settings.lectureMtModel);
+    }
+
+    const info = await lectures.start({
+      title,
+      formats: settings.lectureFormats,
+      meta: {
+        sourceLabel: sourceLabel || source || '未知',
+        asrModel: modelKey,
+        mtModel: translator.available ? translator.model : '（未启用）',
+      },
+    });
+    console.log(`[lecture] 开始记录「${info.title}」→ ${info.dir}`);
+    return { ok: true, session: info, asrModel: modelKey, mtModel: translator.model };
+  });
+
+  /**
+   * 收一段音频。故意用 on 而不是 handle：渲染层不该等识别结果，
+   * 结果通过 lec:segment / lec:translated 事件回推。
+   */
+  ipcMain.on('lec:feed', (_e, payload) => {
+    if (!lectures.active) return;
+    const { pcm, startMs } = payload || {};
+    if (!pcm) return;
+    // 结构化克隆过来的是 ArrayBuffer，转回 Float32 视图
+    const audio = new Float32Array(pcm);
+
+    /* 队列积压说明识别跟不上（换了 small 模型、或者机器一时被别的程序占满）。
+       上限给到 12 段（约一分钟音频）：base 模型有 3.6 倍余量，正常情况下压根不会积压，
+       留这么多是为了扛住偶发的卡顿——一分钟的积压大约 17 秒就能追平。
+       再多就只能丢最旧的：字幕的价值随时间衰减得很快，而且内存也不能无限涨。
+       先警告、后丢弃，让人有机会换成「快速」模型。 */
+    if (lec.queue.length >= 6 && !lec.lagWarned) {
+      lec.lagWarned = true;
+      lecSend('lec:warn', {
+        message: '识别有些跟不上语速，字幕会延迟。可以在设置里把识别模型换成「快速」。',
+      });
+    }
+    if (lec.queue.length >= 12) {
+      lec.queue.shift();
+      lec.dropped += 1;
+    }
+    lec.queue.push({ audio, startMs });
+    drainLecture();
+  });
+
+  async function drainLecture() {
+    if (lec.busy || !lec.queue.length || !lectures.active) return;
+    lec.busy = true;
+    const job = lec.queue.shift();
+    try {
+      const r = await asr.transcribe(job.audio, { baseMs: job.startMs });
+
+      /* whisper 会把一个音频块再切成好几个 segment（按它自己的换行规则），
+         这些内部切分必须合回一条——句子边界已经由 VAD 决定了。
+         不合的话一句话会被劈成两条字幕，而且喂给翻译的是残句：
+         实测 "...fundamentals of reinforcement" / "learning." 被分开后，
+         前半句译成了「加强部队的基本内容」。 */
+      const text = r.segments.map((x) => x.text.trim()).filter(Boolean).join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      // 静音块偶尔会得到 "[BLANK_AUDIO]" 或纯标点，这些不该进记录
+      if (!text || /^[\s.,!?\-—[\]()]*$/.test(text) || /^\[.*\]$/.test(text)) return;
+      if (!lectures.active) return;
+
+      /* 时间用音频块自己的起止，而不是 whisper 给的段时间：
+         块的时间来自采样计数，是准的；whisper 的段时间是估计值。 */
+      const t0 = job.startMs;
+      const t1 = job.startMs + (job.audio.length / 16000) * 1000;
+
+      const id = lectures.addSegment({ t0, t1, en: text });
+      lecSend('lec:segment', { id, t0, t1, en: text });
+
+      // 翻译不阻塞下一块音频的识别，两个进程天然并行
+      translateSegment(id, text);
+    } catch (e) {
+      /* 停止记录时会 kill 掉识别服务，在途请求必然报 ECONNRESET/socket hang up。
+         那不是故障，不该当成错误报给用户。 */
+      const shuttingDown = !lectures.active || /ECONNRESET|socket hang up|ECONNREFUSED/i.test(e.message);
+      if (!shuttingDown) {
+        console.error('[lecture] 识别失败：', e.message);
+        lecSend('lec:warn', { message: `识别失败：${e.message}` });
+      }
+    } finally {
+      lec.busy = false;
+      if (lec.queue.length) setImmediate(drainLecture);
+    }
+  }
+
+  async function translateSegment(id, text) {
+    if (!translator.available) {
+      // 没有翻译模型也要放行，否则记录队列会永久卡在这一条
+      lectures.setTranslation(id, null);
+      lecSend('lec:translated', { id, zh: null, reason: '未安装翻译模型' });
+      return;
+    }
+    const r = await translator.translate(text);
+    const zh = r && r.ok ? fixTerms(text, r.text) : null;
+    lectures.setTranslation(id, zh);
+    lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
+  }
+
+  handle('lec:stop', async () => {
+    if (!lectures.active) return { ok: false, reason: '没有在记录' };
+    /* 先把队列里剩的音频识别完再收尾，否则最后十几秒会丢。
+     *
+     * 判据是「还有没有进展」，不是固定的墙钟时间。原先写死等 25 秒，
+     * 结果积压时会静默丢内容——实测打包版里 13 段只落盘 7 段，
+     * 剩下的正好卡在超时那一刻。真实上课不会积压（每 5 秒来一段、识别 1.4 秒），
+     * 但机器偶尔卡一下就该等它追完，而不是把课丢掉。
+     *
+     * 只要队列在变短就一直等；连续 20 秒毫无进展才放弃（那说明识别真的挂了）。
+     */
+    const STALL_MS = 20_000;
+    let lastLen = lec.queue.length + (lec.busy ? 1 : 0);
+    let lastProgress = Date.now();
+    while (lec.queue.length || lec.busy) {
+      await new Promise((r) => setTimeout(r, 200));
+      const len = lec.queue.length + (lec.busy ? 1 : 0);
+      if (len < lastLen) {
+        lastLen = len;
+        lastProgress = Date.now();
+      } else if (Date.now() - lastProgress > STALL_MS) {
+        console.warn(`[lecture] 收尾时识别停滞，放弃剩余 ${lec.queue.length} 段`);
+        break;
+      }
+    }
+    const out = await lectures.stop();
+    asr.stop();
+    if (lec.prevMtModel) {
+      translator.setModel(lec.prevMtModel);
+      lec.prevMtModel = null;
+    }
+    console.log(`[lecture] 记录结束：${out.segments} 条，${out.dir}`);
+    return { ok: true, ...out, dropped: lec.dropped };
+  });
+
+  /**
+   * 自测用：按真实节奏把一整段 PCM 喂进实时链路。
+   *
+   * 节奏必须在主进程里控制。原先放在渲染层用 setTimeout 分几百次喂，
+   * 打包版跑到这步卡了 19 分钟只出 2 条——Chromium 会把不可见窗口的定时器
+   * 限流到每秒一次。主进程没有这个限制。
+   *
+   * 这里用的是和真实采音同一个 VadChunker、同一个 lec:feed 通道，
+   * 所以除「拿到麦克风音频」之外的每一环都被覆盖。
+   */
+  handle('lec:selfTestFeed', async ({ pcm, speed = 4 } = {}) => {
+    if (!lectures.active) return { error: '没有正在进行的记录' };
+    const { VadChunker } = require('./vad-chunker');
+    const audio = new Float32Array(pcm);
+    const vad = new VadChunker({
+      rate: 16000,
+      maxMs: LECTURE_MAX_CHUNK_SEC * 1000,
+      silenceMs: settings.lectureSilenceMs,
+    });
+
+    const sliceMs = 100;
+    const step = Math.round(16000 * (sliceMs / 1000));
+    const paceMs = Math.max(1, Math.round(sliceMs / speed));
+    let fed = 0;
+
+    for (let i = 0; i < audio.length; i += step) {
+      const part = audio.subarray(i, Math.min(i + step, audio.length));
+      for (const cut of vad.push(part)) {
+        /* 走和渲染层完全一样的入队路径，包括积压丢弃逻辑。
+           直接调 drainLecture 会绕开那部分，验证就不完整了。 */
+        lec.queue.push({ audio: cut.pcm, startMs: cut.startMs });
+        fed += 1;
+        drainLecture();
+      }
+      await new Promise((r) => setTimeout(r, paceMs));
+    }
+    const tail = vad.flush();
+    if (tail) {
+      lec.queue.push({ audio: tail.pcm, startMs: tail.startMs });
+      fed += 1;
+      drainLecture();
+    }
+    return { fedSeconds: audio.length / 16000, chunks: fed, speed };
+  });
+
+  /* ---- 电影字幕悬浮窗 ---- */
+
+  /**
+   * 悬浮窗共用实时字幕那条流水线（识别 + 翻译），只是**不落盘**：
+   * 看电影不需要留记录，要留的话去「实时字幕」页开。
+   * 所以这里给 lectures 起一个 formats 为空的会话——流水账照样写，
+   * 万一看到值得记的内容还能从历史里恢复出来。
+   */
+  handle('sub:start', async () => {
+    if (lectures.active) return { ok: false, reason: '正在记录课堂字幕，先停止那边' };
+    if (!asr.available) {
+      return { ok: false, reason: '没有安装语音识别组件，请先运行 npm run fetch:asr' };
+    }
+
+    const modelKey = asr.installedModels().some((m) => m.key === settings.asrModel)
+      ? settings.asrModel : (asr.installedModels()[0]?.key || 'base');
+    try {
+      /* 影视对白不是学术演讲，领域提示词只会把它往术语上带偏，
+         所以这里刻意不传 prompt。 */
+      await asr.start(modelKey, { prompt: '' });
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+
+    lec.queue.length = 0;
+    lec.busy = false;
+    lec.dropped = 0;
+    lec.lagWarned = false;
+    lec.prevMtModel = translator.model;
+    if (settings.lectureMtModel && settings.lectureMtModel !== translator.model) {
+      translator.setModel(settings.lectureMtModel);
+    }
+
+    const info = await lectures.start({
+      title: '视频字幕',
+      formats: [],     // 不生成成品文件，只留流水账
+      meta: { sourceLabel: '系统声音（视频）', asrModel: modelKey, mtModel: translator.model },
+    });
+    console.log(`[subtitle] 开始 → ${info.dir}`);
+    return { ok: true, asrModel: modelKey, mtModel: translator.model };
+  });
+
+  handle('sub:stop', async () => {
+    if (!lectures.active) return { ok: true };
+    const out = await lectures.stop();
+    asr.stop();
+    if (lec.prevMtModel) {
+      translator.setModel(lec.prevMtModel);
+      lec.prevMtModel = null;
+    }
+    console.log(`[subtitle] 结束，${out.segments} 条`);
+    return { ok: true, ...out };
+  });
+
+  handle('sub:hide', () => { toggleSubtitleWindow(false); });
+  handle('sub:toggle', (on) => toggleSubtitleWindow(on ?? null));
+
+  /**
+   * 鼠标穿透。锁定后字幕不再拦鼠标，可以点到后面的播放器。
+   * forward: true 让窗口仍能收到 mousemove——否则 hover 显隐的工具条
+   * 永远不会出现，用户就再也解不开锁了。
+   */
+  handle('sub:setLocked', (locked) => {
+    if (!subWin || subWin.isDestroyed()) return false;
+    subWin.setIgnoreMouseEvents(!!locked, { forward: true });
+    return !!locked;
+  });
+
+  handle('lec:list', () => lectures.list());
+  handle('lec:open', (dir) => { if (dir) shell.openPath(dir); });
+  handle('lec:reveal', (file) => { if (file) shell.showItemInFolder(file); });
+  handle('lec:recover', (dir) => lectures.recover(dir, settings.lectureFormats));
+
+  /* ---- 导入已有录音（课后转写） ---- */
+
+  handle('lec:pickAudio', async () => {
+    /* 截图/自测模式下直接给定文件，不弹对话框——
+       实时链路要靠它喂真实语音做端到端验证（麦克风在自动化里没法喂）。 */
+    const shotAudio = process.env.LEXICA_SHOT_AUDIO;
+    if (shotAudio && fs.existsSync(shotAudio)) {
+      const buf = await fsp.readFile(shotAudio);
+      return {
+        ok: true,
+        path: shotAudio,
+        name: path.basename(shotAudio),
+        bytes: buf.byteLength,
+        data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+      };
+    }
+
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
+      title: '选择课堂录音',
+      properties: ['openFile'],
+      filters: [{ name: '音频', extensions: ['wav', 'mp3', 'm4a', 'aac', 'ogg', 'opus', 'flac', 'webm', 'mp4'] }],
+    });
+    if (canceled || !filePaths?.length) return { ok: false, reason: '已取消' };
+    const f = filePaths[0];
+    try {
+      /* 把字节交给渲染层解码。
+         这里不用 ffmpeg —— 本机没有，而 Chromium 自带 mp3/m4a/ogg 解码器，
+         渲染层用 decodeAudioData 就能解，再用 OfflineAudioContext 重采样到 16k 单声道。
+         省掉一个外部依赖，格式支持面还更宽。 */
+      const buf = await fsp.readFile(f);
+      return {
+        ok: true,
+        path: f,
+        name: path.basename(f),
+        bytes: buf.byteLength,
+        data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+      };
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
+  /**
+   * 转写整段录音。渲染层已经解码重采样成 16k 单声道 Float32 送进来。
+   * 走 whisper-cli 而不是常驻服务：一次性任务不在乎模型加载，
+   * 而且可以用跑不动实时的 small 模型换准确率。
+   */
+  handle('lec:transcribeFile', async ({ pcm, title, modelKey } = {}) => {
+    if (!pcm) return { ok: false, reason: '没有音频数据' };
+    if (!asr.available) return { ok: false, reason: '没有安装语音识别组件' };
+    if (lectures.active) return { ok: false, reason: '正在实时记录，先停止再导入' };
+
+    const audio = new Float32Array(pcm);
+    const tmp = path.join(app.getPath('temp'), `lexica-import-${Date.now()}.wav`);
+    const { wrapWav, floatToPcm16 } = require('./asr');
+    await fsp.writeFile(tmp, wrapWav(floatToPcm16(audio), 16000));
+
+    const model = asr.installedModels().some((m) => m.key === modelKey)
+      ? modelKey : settings.asrModel;
+
+    try {
+      lecSend('lec:importProgress', { phase: 'asr', percent: 0 });
+      const r = await asr.transcribeFile(tmp, {
+        modelKey: model,
+        prompt: [title ? `Lecture: ${title}.` : '', settings.asrPrompt || '']
+          .filter(Boolean).join(' ').trim(),
+        onProgress: (p) => lecSend('lec:importProgress', { phase: 'asr', percent: p }),
+      });
+      if (!r.segments.length) return { ok: false, reason: '没有识别出任何内容' };
+
+      const info = await lectures.start({
+        title: title || '导入的录音',
+        formats: settings.lectureFormats,
+        meta: {
+          sourceLabel: '导入的录音',
+          asrModel: model,
+          mtModel: translator.available ? translator.model : '（未启用）',
+        },
+      });
+
+      // 逐条翻译并落盘，顺便回报进度——一小时的录音会有几百条
+      const total = r.segments.length;
+      for (const [i, seg] of r.segments.entries()) {
+        const text = seg.text.trim();
+        if (!text || /^\[.*\]$/.test(text)) continue;
+        const id = lectures.addSegment({ t0: seg.t0, t1: seg.t1, en: text });
+        lecSend('lec:segment', { id, t0: seg.t0, t1: seg.t1, en: text });
+        if (translator.available) {
+          const tr = await translator.translate(text);
+          const zh = tr && tr.ok ? fixTerms(text, tr.text) : null;
+          lectures.setTranslation(id, zh);
+          lecSend('lec:translated', { id, zh });
+        } else {
+          lectures.setTranslation(id, null);
+        }
+        lecSend('lec:importProgress', { phase: 'mt', percent: Math.round(((i + 1) / total) * 100) });
+      }
+
+      const out = await lectures.stop();
+      return { ok: true, ...out, session: info };
+    } catch (e) {
+      if (lectures.active) await lectures.stop();
+      return { ok: false, reason: e.message };
+    } finally {
+      await fsp.rm(tmp, { force: true });
+    }
+  });
+
+  handle('goal:progress', () => user.goalProgress(settings));
+
+  /* ---- 用户数据备份与恢复 ---- */
+  handle('backup:export', async () => {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
+      title: '备份学习数据',
+      defaultPath: `lexica-backup-${new Date().toISOString().slice(0, 10)}.db`,
+      filters: [{ name: 'Lexica 备份', extensions: ['db'] }],
+    });
+    if (canceled || !filePath) return { ok: false, reason: '已取消' };
+    // WAL 里可能还有没落盘的事务，先 checkpoint 再复制
+    user.checkpoint();
+    fs.copyFileSync(user.file, filePath);
+    return { ok: true, filePath, bytes: fs.statSync(filePath).size };
+  });
+
+  handle('backup:import', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
+      title: '恢复学习数据',
+      properties: ['openFile'],
+      filters: [{ name: 'Lexica 备份', extensions: ['db'] }],
+    });
+    if (canceled || !filePaths?.length) return { ok: false, reason: '已取消' };
+    const src = filePaths[0];
+
+    // 先验证是不是一个合法的 Lexica 备份，别把用户现有数据换成一个坏文件
+    try {
+      const probe = new (require('node:sqlite').DatabaseSync)(src, { readOnly: true });
+      const t = probe.prepare(
+        "SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name IN ('wordbook','settings')",
+      ).get().c;
+      probe.close();
+      if (t < 2) return { ok: false, reason: '这不是 Lexica 的备份文件' };
+    } catch (e) {
+      return { ok: false, reason: `备份文件无法读取：${e.message}` };
+    }
+
+    const { response } = await dialog.showMessageBox(mainWin, {
+      type: 'warning',
+      buttons: ['取消', '覆盖并重启'],
+      defaultId: 0,
+      cancelId: 0,
+      title: '恢复学习数据',
+      message: '这会用备份覆盖当前的生词本、练习进度与设置',
+      detail: '当前数据会先另存为 user.db.bak。恢复后应用将重启。',
+    });
+    if (response !== 1) return { ok: false, reason: '已取消' };
+
+    user.checkpoint();
+    user.close();
+    try {
+      fs.copyFileSync(user.file, `${user.file}.bak`);
+      // WAL/SHM 属于旧库，不清掉会和新文件对不上
+      for (const ext of ['-wal', '-shm']) fs.rmSync(`${user.file}${ext}`, { force: true });
+      fs.copyFileSync(src, user.file);
+    } catch (e) {
+      return { ok: false, reason: `恢复失败：${e.message}` };
+    }
+    quitting = true;
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
+  });
+
+  handle('app:openLog', () => {
+    const p = logger.path();
+    if (p && fs.existsSync(p)) shell.showItemInFolder(p);
+    else shell.openPath(path.join(app.getPath('userData'), 'logs'));
+  });
+
+  /* ---- 自定义词表 ---- */
+  handle('list:all', () =>
+    user.lists().map((l) => ({ ...l, scope: `list:${l.id}` })));
+
+  handle('list:create', (name, text, note) => {
+    const r = user.createList(name, text, note);
+    if (r.ok) quiz.invalidateCustom();
+    return r;
+  });
+
+  handle('list:delete', (id) => {
+    const r = user.deleteList(id);
+    if (r.ok) quiz.invalidateCustom();
+    return r;
+  });
+
+  handle('list:preview', (text) => {
+    // 导入前先告诉用户：解析出多少词、词库里能查到多少
+    const words = [];
+    const seen = new Set();
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const w = line.split(/[\t,，;；]/)[0].trim().replace(/^[-*•\d.、)\s]+/, '').trim();
+      if (!w || w.startsWith('#') || w.length > 64) continue;
+      const k = w.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      words.push(k);
+    }
+    let known = 0;
+    const missing = [];
+    for (const w of words) {
+      if (dict.lookup(w, { noHistory: true }).status === 'ok') known++;
+      else if (missing.length < 12) missing.push(w);
+    }
+    return { total: words.length, known, missing };
+  });
+
+  handle('list:importFile', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
+      title: '导入单词表',
+      properties: ['openFile'],
+      filters: [{ name: '文本 / CSV', extensions: ['txt', 'csv', 'tsv', 'md'] }],
+    });
+    if (canceled || !filePaths?.length) return { ok: false, reason: '已取消' };
+    try {
+      const text = fs.readFileSync(filePaths[0], 'utf8');
+      return { ok: true, text, name: path.basename(filePaths[0]).replace(/\.[^.]+$/, '') };
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
+  /* ---- 自定义词条 ---- */
+  handle('custom:all', (limit) => user.customEntries(limit || 500));
+  handle('custom:get', (word) => user.customEntry(word));
+  handle('custom:put', (entry) => user.putCustomEntry(entry));
+  handle('custom:delete', (word) => user.deleteCustomEntry(word));
+
+  handle('app:openDataFolder', () => {
+    const p = path.dirname(resolveDictPath());
+    fs.mkdirSync(p, { recursive: true });
+    shell.openPath(p);
+  });
+
+  handle('app:quickHide', () => { quickWin?.hide(); });
+  handle('app:quickToMain', (word) => { quickWin?.hide(); focusMain(word); });
+  handle('app:relaunch', () => { quitting = true; app.relaunch(); app.exit(0); });
+}
+
+/* ========================================================================== */
+/*  开发用截图                                                                 */
+/* ========================================================================== */
+
+/**
+ * 设了 LEXICA_SHOT=<输出目录> 就按脚本走一遍界面、逐张截图然后退出。
+ * 用来在改完样式后快速核对两套主题的实际效果，正常启动完全不受影响。
+ * 这种模式下 userData 指向临时目录，不会碰到真实的生词本。
+ */
+async function runShotSequence(dir) {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  fs.mkdirSync(dir, { recursive: true });
+
+  /* 把渲染层的报错转到主进程日志。
+   *
+   * 没有这一条时渲染层抛的异常完全不可见：界面只是「没有变化」，
+   * 日志里一行都没有，截图看起来像是某个断言写错了。实际踩过一次——
+   * 一个渲染函数抛异常，后面每一张截图都是同一个首页。 */
+  for (const w of BrowserWindow.getAllWindows()) {
+    w.webContents.on('console-message', (e) => {
+      if (e.level === 'error' || e.level === 'warning') {
+        console.error(`[renderer:${e.level}]`, e.message, e.lineNumber ? `(${e.sourceId}:${e.lineNumber})` : '');
+      }
+    });
+  }
+
+  /* 上一张截图的字节，用来发现旧帧（见下面 shot 的注释） */
+  const lastPng = new Map();
+  let stalePngs = 0;
+
+  /**
+   * capturePage 在窗口被遮挡或未重绘时可能一直不 resolve，
+   * 所以加超时兜底，单张失败也不影响后面的步骤。
+   *
+   * 抓之前必须先逼出一帧。capturePage 返回的是「最后呈现的那一帧」，
+   * 窗口被别的窗口盖住时合成器干脆不产新帧——实测 33/41/17 三张字节完全相同，
+   * 而 18 往后每一张都比实际状态慢一步：19 拍成了模式页、20 拍成了题面。
+   * invalidate() 手动泵一帧，再等两个 rAF 确认它真画完了；
+   * 窗口被遮挡时 rAF 可能压根不跑，所以带超时兜底。
+   */
+  const shot = async (name, win = mainWin) => {
+    try {
+      win.focus();
+      try { win.webContents.invalidate(); } catch { /* 旧版本没有这个方法 */ }
+      await Promise.race([
+        win.webContents.executeJavaScript(
+          'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))',
+        ).catch(() => null),
+        wait(1500),
+      ]);
+
+      const img = await Promise.race([
+        win.webContents.capturePage(),
+        wait(6000).then(() => null),
+      ]);
+      if (!img) { console.log('[shot]', name, '超时跳过'); return; }
+      const png = img.toPNG();
+      fs.writeFileSync(path.join(dir, `${name}.png`), png);
+
+      /* 主窗口每一步都换了视图或主题，连着两张一模一样就只能是旧帧。
+         悬浮窗不比（40-subtitle-locked 和上一张本来就该长得一样）。 */
+      if (win === mainWin && lastPng.get(win.id)?.equals(png)) {
+        stalePngs++;
+        console.error('[shot] ✗', name, '与上一张字节完全相同，抓到的是旧帧');
+      } else {
+        console.log('[shot]', name, 'ok');
+      }
+      lastPng.set(win.id, png);
+    } catch (e) {
+      console.log('[shot]', name, '失败:', e.message);
+    }
+  };
+
+  const setTheme = async (theme) => {
+    settings.theme = theme;
+    try { mainWin.setTitleBarOverlay({ ...THEME_CHROME[theme], height: 60 }); } catch { /* 忽略 */ }
+    broadcast('set:theme', { theme });
+    await wait(700);
+  };
+
+  const lookup = async (word) => {
+    mainWin.webContents.send('nav:lookup', { word });
+    await wait(900);
+  };
+
+  const view = async (v) => {
+    mainWin.webContents.send('nav:view', { view: v });
+    await wait(700);
+  };
+
+  /**
+   * 布局不变式：#stage 必须是真正的滚动容器。
+   *
+   * 曾经因为 .app 的隐式 grid 行是 auto 尺寸、被内容撑开，导致 #stage 长到整页高度、
+   * 内部不再溢出，溢出落到 body{overflow:hidden} 上——程序化 scrollIntoView 照样能滚，
+   * 截图看起来完全正常，但用户的鼠标滚轮彻底失灵。这种问题会静默回归，所以每次截图
+   * 都顺手断言一次。
+   */
+  const assertScrollable = async () => {
+    const r = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const s = document.querySelector('#stage');
+        const d = document.querySelector('#view-dict');
+        return {
+          stageScrollable: s.scrollHeight > s.clientHeight,
+          bodyOverflows: document.body.scrollHeight > document.body.clientHeight,
+          /* 出问题时要能分清「布局坏了」和「页面压根没渲染」。
+             只报 scrollHeight 的话两种情况长得一模一样。 */
+          stageH: s.scrollHeight,
+          clientH: s.clientHeight,
+          sections: d ? d.querySelectorAll('.section').length : -1,
+          head: d?.querySelector('.head-text')?.textContent?.trim() || null,
+        };
+      })()
+    `);
+    if (!r.stageScrollable || r.bodyOverflows) {
+      console.error('[shot] ✗ 布局异常：#stage 不是滚动容器，鼠标滚轮将失灵', r);
+    } else {
+      console.log('[shot] ✓ 滚动容器正常（#stage）');
+    }
+  };
+
+  /**
+   * 把内容区滚到指定选择器处，用来给页面下半部分（词源、引文、折叠按钮）截图。
+   * 用 scrollIntoView 而不是 offsetTop —— 目标元素的定位祖先不是滚动容器，
+   * offsetTop 算出来的偏移和 #stage 的 scrollTop 不在同一坐标系里。
+   */
+  const scrollTo = async (selector) => {
+    const found = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        el.scrollIntoView({ block: 'center' });
+        return true;
+      })()
+    `);
+    if (!found) console.log('[shot] 未找到', selector);
+    await wait(600);
+  };
+
+  /**
+   * 轮询等元素出现，返回等到没等到。
+   *
+   * 渲染层几乎每个视图都是「先画个占位、异步拉完数据再重画」，
+   * 固定 wait 多少都是在赌机器快慢（loadDrill() 要等四个 IPC，
+   * drillStart() 还要再等一次出题）。要等的是 DOM，就直接等 DOM。
+   */
+  const waitFor = async (selector, timeoutMs = 12000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const ok = await mainWin.webContents.executeJavaScript(
+        `!!document.querySelector(${JSON.stringify(selector)})`,
+      ).catch(() => false);
+      if (ok) return true;
+      if (Date.now() >= deadline) return false;
+      await wait(120);
+    }
+  };
+
+  /**
+   * 等元素出现再点；等不到就抛，让整个流程以非零码退出。
+   *
+   * 原先是「固定 wait 之后单点一次，点不到打一行日志继续往下走」。
+   * 考纲练习那一段因此长期静默失效：日志里躺着三行「点不到」，
+   * 后面四张截图拍的全是上一个状态，而流程照样 exit 0。
+   * 自测里「没点到」和「点了但结果不对」是一回事，都该红。
+   */
+  const click = async (selector, waitMs = 800, timeoutMs = 12000) => {
+    if (!(await waitFor(selector, timeoutMs))) {
+      throw new Error(`[shot] 等不到可点的元素：${selector}（等了 ${timeoutMs}ms）`);
+    }
+    await mainWin.webContents.executeJavaScript(
+      `document.querySelector(${JSON.stringify(selector)}).click()`,
+    );
+    await wait(waitMs);
+  };
+
+  /* 等词库真的就绪，不要靠固定时长。
+   *
+   * 原先是 `await wait(1600)`。词库 1.2 GB，文件不在系统缓存里时打开更慢
+   * （连着跑几个 Electron 实例就会把缓存挤掉），慢一点第一次查词就会落空：
+   * go() 见 state.stats.ready 为假直接 return，界面停在首页，
+   * 然后第一条布局断言报「#stage 不是滚动容器」——看着像布局坏了，
+   * 其实是词库还没加载完。排查这个花了不少时间，所以改成显式等待。 */
+  for (let i = 0; i < 60; i++) {
+    const ok = await mainWin.webContents.executeJavaScript(
+      '!!window.__lexicaShot?.ready?.()',
+    ).catch(() => false);
+    if (ok) break;
+    await wait(500);
+  }
+  await wait(400);   // 首页渲染完
+
+  await lookup('run');
+
+  await assertScrollable();
+  await shot('01-entry-paper');
+
+  await lookup('ephemeral');
+  await shot('02-entry-paper-gre');
+
+  await setTheme('glass');
+  await shot('03-entry-glass');
+
+  await lookup('meticulous');
+  await shot('04-entry-glass-2');
+
+  await view('wordbook');
+  await shot('05-wordbook-glass');
+
+  await setTheme('paper');
+  await shot('06-wordbook-paper');
+
+  await view('review');
+  await shot('07-review-paper');
+
+  await view('settings');
+  await shot('08-settings-paper');
+
+  await view('dict');
+  mainWin.webContents.send('nav:lookup', { word: 'recieve' });
+  await wait(1000);
+  await shot('09-misspelling-correction');
+
+  await lookup('children');
+  await shot('10-inflection-redirect');
+
+  // 易混词区块
+  await lookup('principal');
+  await scrollTo('.confuse-list');
+  await shot('25-confusables');
+
+  // 中文反查
+  mainWin.webContents.send('nav:lookup', { word: '光合作用' });
+  await wait(900);
+  await shot('11-chinese-lookup');
+
+  // 悬浮查词窗（两套主题各来一张）
+  showQuickWindow('serendipity');
+  await wait(1400);
+  await shot('12-quick-paper', quickWin);
+
+  await setTheme('glass');
+  await wait(500);
+  await shot('13-quick-glass', quickWin);
+
+  // 划词场景：悬浮窗里查一个词库没有的学术词组，看拆解 + 机器翻译
+  await setTheme('paper');
+  showQuickWindow('ablation study');
+  await wait(4000); // 模型已在后台预热过，这里只等一次推理
+  await shot('29-quick-phrase-fallback', quickWin);
+
+  // 划到整句：悬浮窗里给术语对照 + 双语逐句译文
+  await setTheme('paper');
+  showQuickWindow('The mitochondria generate adenosine triphosphate through oxidative phosphorylation.');
+  await wait(6000); // 逐句翻译，一句约 1 秒
+  await shot('30-quick-sentence', quickWin);
+  quickWin?.hide();
+
+  // 页面下半部分：义项折叠按钮、词源、古典引文
+  await setTheme('paper');
+  quickWin?.hide();
+  await lookup('run');
+  await scrollTo('.fold-btn');
+  await shot('14-sense-folding');
+
+  await lookup('candid');
+  await scrollTo('.etym');
+  await shot('15-etymology-quotes');
+
+  await setTheme('glass');
+  await lookup('abandon');
+  await scrollTo('.etym');
+  await shot('16-etymology-glass');
+
+  /* 拼写题与自定义页 */
+  await setTheme('paper');
+  mainWin.webContents.send('nav:view', { view: 'drill' });
+  await wait(900);
+  await mainWin.webContents.executeJavaScript(`
+    (async () => {
+      const app = window.__lexicaShot;
+      if (app) await app.startSpellQuiz();
+    })()
+  `).catch(() => {});
+  await wait(1400);
+  await shot('26-spell-question');
+
+  await mainWin.webContents.executeJavaScript(`
+    (() => {
+      const i = document.querySelector('#spellInput');
+      if (i) { i.value = 'meticulus'; }
+      const b = document.querySelector('[data-act="drill-spell"]');
+      if (b) b.click();
+    })()
+  `).catch(() => {});
+  await wait(1200);
+  await shot('27-spell-feedback');
+
+  await view('custom');
+  await shot('28-custom-lists');
+
+  /* ---- 实时字幕：用一段真实语音跑完整链路 ---- */
+  if (process.env.LEXICA_SHOT_AUDIO) {
+    await setTheme('paper');
+    await view('lecture');
+    await shot('35-lecture-idle');
+
+    /* 走 Lx.lectureSelfTest：它用真实的 VadChunker 切分、经 lec:feed 送进主进程，
+       从这里往后（识别、翻译、落盘）与真实使用完全一致。
+       麦克风在自动化里喂不了，但采音之外的每一环都被覆盖了。 */
+    const fed = await mainWin.webContents.executeJavaScript(
+      '(async () => { try { return await window.Lx.lectureSelfTest(); } '
+      + 'catch (e) { return { error: e.message }; } })()',
+    ).catch((e) => ({ error: e.message }));
+    console.log('[shot] 实时字幕自测已喂入', fed);
+
+    if (!fed?.error) {
+      // 自测按 4 倍速喂 66 秒音频（约 17 秒），加上识别追平的时间
+      await wait(14000);
+      await shot('36-lecture-live');
+      await wait(14000);
+
+      const done = await mainWin.webContents.executeJavaScript(
+        '(async () => { try { return await window.Lx.lectureSelfTestStop(); } '
+        + 'catch (e) { return { error: e.message }; } })()',
+      ).catch((e) => ({ error: e.message }));
+      await wait(600);
+      await shot('37-lecture-done');
+
+      /* 这条断言比截图重要：字幕有没有真的落到文件里。
+         截图只能证明界面画出来了，证明不了写盘。 */
+      if (done?.ok && done.dir) {
+        const wrote = fs.readdirSync(done.dir);
+        const hasAll = ['transcript.md', 'transcript.txt', 'transcript.srt', 'transcript.json', 'journal.jsonl']
+          .filter((f) => !wrote.includes(f));
+        if (done.segments > 0 && !hasAll.length) {
+          console.log(`[shot] ✓ 实时字幕落盘 ${done.segments} 条，${wrote.length} 个文件 → ${done.dir}`);
+        } else {
+          console.error('[shot] ✗ 实时字幕落盘异常', { segments: done.segments, 缺少: hasAll, wrote });
+        }
+      } else {
+        console.error('[shot] ✗ 实时字幕自测没有正常结束', done);
+      }
+
+      await view('lecture');
+      await mainWin.webContents.executeJavaScript(
+        "document.querySelector('[data-act=\"lec-tab\"][data-v=\"history\"]')?.click()",
+      ).catch(() => {});
+      await wait(700);
+      await shot('38-lecture-history');
+    }
+  }
+
+  /* ---- 视频字幕悬浮窗 ---- */
+  if (process.env.LEXICA_SHOT_AUDIO) {
+    await setTheme('paper');
+    toggleSubtitleWindow(true);
+    await wait(4000);   // 等它起识别服务（悬浮窗一显示就自己开始听）
+
+    /* 悬浮窗抓的是系统声音，自动化里没法放音频。
+       但 lecSend 会同时推给悬浮窗，所以用自测通道把真实语音喂进同一条流水线，
+       悬浮窗就该显示出字幕——除「抓系统声音」之外的每一环都被验证到了。 */
+    const subFed = await mainWin.webContents.executeJavaScript(
+      '(async () => { try { const p = await window.lexica.lecPickAudio();'
+      + ' if (!p || !p.ok) return { error: p && p.reason };'
+      + ' const pcm = await window.Lx.lectureDecodeForTest(p.data);'
+      + ' return await window.lexica.lecSelfTestFeed({ pcm, speed: 6 }); }'
+      + ' catch (e) { return { error: e.message }; } })()',
+    ).catch((e) => ({ error: e.message }));
+    console.log('[shot] 悬浮窗喂入', subFed);
+
+    await wait(9000);
+    await shot('39-subtitle-float', subWin);
+
+    /* 断言字幕真的画出来了：透明置顶窗口的截图不一定靠得住
+       （窗口没真正前置时 capturePage 会给旧帧），查 DOM 才准。 */
+    const subState = await subWin.webContents.executeJavaScript(`
+      (() => {
+        const lines = document.querySelectorAll('.sub-line');
+        return {
+          lines: lines.length,
+          en: lines.length ? lines[lines.length - 1].querySelector('.sub-en').textContent.trim() : null,
+          zh: lines.length ? lines[lines.length - 1].querySelector('.sub-zh').textContent.trim() : null,
+          state: document.querySelector('#subState')?.textContent || '',
+        };
+      })()
+    `).catch((e) => ({ error: e.message }));
+
+    if (subState.lines > 0 && subState.en) {
+      console.log(`[shot] ✓ 悬浮窗显示 ${subState.lines} 条字幕：${subState.en.slice(0, 50)}`);
+      console.log(`[shot]   译文：${String(subState.zh).slice(0, 50)}`);
+    } else {
+      console.error('[shot] ✗ 悬浮窗没有字幕', subState);
+    }
+
+    // 顺手验证鼠标穿透开关不会把窗口弄坏
+    subWin.setIgnoreMouseEvents(true, { forward: true });
+    await wait(400);
+    await shot('40-subtitle-locked', subWin);
+    subWin.setIgnoreMouseEvents(false);
+
+    await mainWin.webContents.executeJavaScript('window.lexica.subStop()').catch(() => {});
+    await wait(800);
+    toggleSubtitleWindow(false);
+  }
+
+  /* ---- 长句：查词框输入整句 + 独立翻译页 ---- */
+  await setTheme('paper');
+  await view('dict');
+  mainWin.webContents.send('nav:lookup', {
+    word: 'Photosynthesis converts light energy into chemical energy stored in glucose.',
+  });
+  /* 这里不调 assertScrollable()：长句页内容短，本来就装得下一屏，
+     不滚动是正常的，那个不变式只对必然超长的词条页有意义。 */
+  await wait(4500); // 术语立刻出，译文要等模型逐句跑完
+  await shot('31-sentence-result');
+
+  await setTheme('glass');
+  await shot('32-sentence-result-glass');
+
+  await setTheme('paper');
+  await view('translate');
+  await mainWin.webContents.executeJavaScript(`
+    (() => {
+      const t = document.querySelector('#trInput');
+      if (!t) return false;
+      t.value = 'Recent advances in self-supervised learning have substantially reduced the need for labeled data. '
+              + 'Our ablation study indicates that the projection head is critical: '
+              + 'removing it degrades linear-probe accuracy from 71.2 to 63.8.';
+      t.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-act="tr-run"]').click();
+      return true;
+    })()
+  `).catch(() => {});
+  /* 等得比看起来需要的久：翻译进程是串行的，实时字幕那段自测会往它的队列里
+     压十几条，这里得排在后面。 */
+  await wait(30000);
+  await shot('33-translate-page');
+
+  /**
+   * 双语对照必须真的渲染出来。
+   *
+   * 这条不能靠截图核：译文在折叠线以下，而窗口没被真正前置时
+   * capturePage 会返回滚动前的旧帧，看起来像没渲染。直接查 DOM 才准。
+   * 只看 #trResult 内部——视图是 display:none 而不是移除，
+   * 整个 document 里找 .tr-pair 会把隐藏的查词视图一起数进来。
+   */
+  const trState = await mainWin.webContents.executeJavaScript(`
+    (() => {
+      const box = document.querySelector('#trResult');
+      return {
+        pairs: box ? box.querySelectorAll('.tr-pair').length : -1,
+        loading: !!box?.querySelector('.tr-progress'),
+        error: box?.querySelector('.tr-error')?.textContent?.trim() || null,
+      };
+    })()
+  `).catch((e) => ({ threw: e.message }));
+
+  if (trState.pairs >= 2 && !trState.loading && !trState.error) {
+    console.log(`[shot] ✓ 翻译页双语对照 ${trState.pairs} 句`);
+  } else {
+    console.error('[shot] ✗ 翻译页没出结果', trState);
+  }
+
+  /* ---- 术语表：整条链路跑一遍真模型 ----
+   *
+   * 这一段比截图重要得多。术语表的整个机制建立在一个假设上：
+   * 「模型对同一个术语的错译是固定的，问一次就能拿到」。
+   * 这里把它验证出来，并把模型实际给出的错译写法打到日志里——
+   * 这是唯一能确认替换真的会发生的办法。
+   */
+  await setTheme('paper');
+  await view('custom');
+  {
+    const imported = await mainWin.webContents.executeJavaScript(`
+      window.lexica.glossImport([
+        'policy = 策略',
+        'value function: 价值函数',
+        'replay buffer    经验回放缓冲',
+        'ablation study，消融实验',
+        'scalar\ttitle'.replace('title', '标量'),
+      ].join(String.fromCharCode(10)), false)
+    `).catch((e) => ({ error: e.message }));
+    console.log('[shot] 术语表导入', imported);
+
+    /* 探测是后台串行跑的：每条要问三次模型（裸词 / 带冠词 / 框架句），
+       一条三四秒。五条给足时间。 */
+    await wait(30000);
+
+    const terms = await mainWin.webContents.executeJavaScript('window.lexica.glossAll()')
+      .catch((e) => ({ error: e.message }));
+    if (Array.isArray(terms)) {
+      for (const t of terms) {
+        console.log(`[shot]   ${t.surface} → 要 ${t.zh}｜模型会给 ${t.wrong?.length ? t.wrong.join('、') : '(还没探到)'}`);
+      }
+      const probed = terms.filter((t) => t.wrong?.length).length;
+      if (probed >= 3) console.log(`[shot] ✓ 术语探测 ${probed}/${terms.length} 条拿到错译写法`);
+      else console.error(`[shot] ✗ 术语探测只成功 ${probed}/${terms.length} 条，替换基本不会发生`);
+    } else {
+      console.error('[shot] ✗ 读不出术语表', terms);
+    }
+
+    await mainWin.webContents.executeJavaScript(
+      "document.querySelector('[data-act=\"cu-tab\"][data-tab=\"gloss\"]')?.click()",
+    ).catch(() => {});
+    await wait(700);
+    await shot('41-glossary');
+
+    /* 界面这条也得查 DOM。透明/未前置窗口的 capturePage 会给旧帧——
+       实测这张截图拍到的是上一个页面，看图完全判断不了面板有没有画出来。 */
+    const glState = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const box = document.querySelector('#view-custom');
+        const rows = box ? box.querySelectorAll('.gl-row') : [];
+        return {
+          rows: rows.length,
+          tabOn: !!box?.querySelector('[data-tab="gloss"].is-on'),
+          firstEn: rows.length ? rows[0].querySelector('.gl-en')?.textContent.trim() : null,
+          firstZh: rows.length ? rows[0].querySelector('.gl-zh')?.textContent.trim() : null,
+          pending: box ? box.querySelectorAll('.gl-pending').length : -1,
+          hasImport: !!box?.querySelector('#glText'),
+        };
+      })()
+    `).catch((e) => ({ error: e.message }));
+    if (glState.rows === 5 && glState.tabOn && glState.hasImport && glState.pending === 0) {
+      console.log(`[shot] ✓ 术语表面板 ${glState.rows} 条，首条 ${glState.firstEn} → ${glState.firstZh}`);
+    } else {
+      console.error('[shot] ✗ 术语表面板不对', glState);
+    }
+
+    /* 拿一句同时含多个术语的话去译，看替换有没有真的落到译文上。
+       对照组在同一次调用里：句子里没有 policy 这个词的那半句不该被动。 */
+    const probe = await mainWin.webContents.executeJavaScript(`
+      window.lexica.mtTranslate(
+        'We train the policy with a replay buffer and estimate the value function.')
+    `).catch((e) => ({ error: e.message }));
+    console.log('[shot] 术语句译文：', probe?.text || probe);
+    if (probe?.ok) {
+      const hit = ['策略', '经验回放缓冲', '价值函数'].filter((w) => probe.text.includes(w));
+      if (hit.length) console.log(`[shot] ✓ 译文里用上了术语表的译名：${hit.join('、')}`);
+      else console.error('[shot] ✗ 译文没有采用任何术语表译名', probe.text);
+    }
+
+    /* 反向对照：英文里没有 policy，译文里的「政策」必须保持原样。
+       这条不成立的话，术语表就变成了一个会悄悄改坏译文的功能。 */
+    const ctrl = await mainWin.webContents.executeJavaScript(`
+      window.lexica.mtTranslate('The government announced a new economic measure.')
+    `).catch((e) => ({ error: e.message }));
+    console.log('[shot] 对照组译文：', ctrl?.text || ctrl);
+    if (ctrl?.ok && ctrl.text.includes('策略')) {
+      console.error('[shot] ✗ 英文里没有 policy，译文却被改成了「策略」——门槛失效');
+    } else if (ctrl?.ok) {
+      console.log('[shot] ✓ 对照组未被改动');
+    }
+  }
+
+  await setTheme('paper');
+  await view('drill');
+
+  /* 先退回范围列表。
+   *
+   * 上面 26/27 的拼写题把练习页留在了答题态，而 nav:view 是有意不重置进度的
+   * （切去查个词再切回来不该丢掉正在做的题）。所以这里顺着界面上的返回键退，
+   * 顺带把 drill-menu / drill-back 这两条返回路径也覆盖掉。
+   * 按当前 stage 决定点什么，而不是写死点两下——以后挪动截图顺序不会又悄悄坏掉。 */
+  const drillStage = () => mainWin.webContents.executeJavaScript(
+    'window.Lx?.drill?.state?.stage ?? null',
+  ).catch(() => null);
+
+  for (let i = 0; i < 3; i++) {
+    const st = await drillStage();
+    if (st === 'scopes') break;
+    await click(st === 'menu' ? '[data-act="drill-back"]' : '[data-act="drill-menu"]', 500);
+  }
+
+  await waitFor('[data-act="drill-scope"][data-scope="toefl"]');
+  await shot('17-drill-scopes');
+
+  await click('[data-act="drill-scope"][data-scope="toefl"]', 300);
+  await waitFor('[data-act="drill-start"][data-mode="quiz"][data-count="10"]');
+  await shot('18-drill-menu');
+
+  await click('[data-act="drill-start"][data-mode="quiz"][data-count="10"]', 300);
+  await waitFor('.q-opt');
+  await shot('19-drill-question');
+
+  /* 故意挑一个错的选项。
+   *
+   * 答对了 drillPick 会在 750ms 后自动跳下一题，而这里要拍的正是反馈态——
+   * 盲点第一个选项有四分之一概率答对，20/21 就拍成了下一道题的题面。
+   * 正确答案在锁定之前不进 DOM，只能问渲染层的状态。 */
+  const wrongOpt = await mainWin.webContents.executeJavaScript(`
+    (() => {
+      const q = window.Lx?.drill?.state?.quiz;
+      const cur = q?.questions?.[q.i];
+      if (!cur?.options) return null;
+      return cur.options.findIndex((_, i) => i !== cur.answer);
+    })()
+  `).catch(() => null);
+  await click(`.q-opt[data-i="${wrongOpt}"]`, 600);
+  await waitFor('.q-feedback.is-wrong');
+  await shot('20-drill-feedback');
+
+  /* 这条断言比截图管用：窗口没被真正前置时 capturePage 会给旧帧，
+     19/20 拍到的可能是上一个状态，看图分辨不出来。 */
+  const quizState = await mainWin.webContents.executeJavaScript(`
+    (() => {
+      const v = document.querySelector('#view-drill');
+      return {
+        kind: v?.querySelector('.q-kind')?.textContent?.trim() || null,
+        prompt: v?.querySelector('.q-prompt')?.textContent?.trim().slice(0, 40) || null,
+        opts: v ? v.querySelectorAll('.q-opt').length : -1,
+        right: v ? v.querySelectorAll('.q-opt.is-right').length : -1,
+        picked: v ? v.querySelectorAll('.q-opt.is-wrong').length : -1,
+        feedback: v?.querySelector('.q-feedback .q-fb-head')?.textContent?.trim().slice(0, 24) || null,
+        next: !!v?.querySelector('[data-act="drill-next"]'),
+      };
+    })()
+  `).catch((e) => ({ error: e.message }));
+
+  if (quizState.opts >= 2 && quizState.prompt && quizState.right === 1
+      && quizState.picked === 1 && quizState.next) {
+    console.log(`[shot] ✓ 练习出题与反馈正常：${quizState.kind}｜${quizState.prompt}｜${quizState.feedback}`);
+  } else {
+    console.error('[shot] ✗ 练习页不在反馈态', quizState);
+  }
+
+  await setTheme('glass');
+  await shot('21-drill-feedback-glass');
+
+  const glassState = await mainWin.webContents.executeJavaScript(`
+    (() => ({
+      theme: document.documentElement.getAttribute('data-theme'),
+      feedback: !!document.querySelector('#view-drill .q-feedback.is-wrong'),
+    }))()
+  `).catch((e) => ({ error: e.message }));
+  if (glassState.theme === 'glass' && glassState.feedback) {
+    console.log('[shot] ✓ 反馈态在玻璃主题下仍在');
+  } else {
+    console.error('[shot] ✗ 玻璃主题下的反馈态不对', glassState);
+  }
+
+  // 检测模式：连点到底出结果页
+  await setTheme('paper');
+  await click('[data-act="drill-menu"]', 700);
+  await click('[data-act="drill-start"][data-mode="assess"]', 2000);
+  for (let i = 0; i < 30; i++) {
+    const ok = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const opt = document.querySelector('.q-opt:not([disabled])');
+        if (opt) { opt.click(); }
+        const next = document.querySelector('[data-act="drill-next"]:not([disabled])');
+        if (next) { next.click(); return true; }
+        return false;
+      })()
+    `);
+    await wait(160);
+    if (!ok) break;
+  }
+  await waitFor('.result-hero');
+  await wait(600);   // 结果页的环形进度条有动画
+  await shot('22-drill-assessment-result');
+
+  /* 结果页同样只能靠 DOM 核：分层结果是这个模式唯一的产出，
+     连点到底中途断在某道题上，截图看着也像一张正常的练习页。 */
+  const assessState = await mainWin.webContents.executeJavaScript(`
+    (() => {
+      const v = document.querySelector('#view-drill');
+      return {
+        stage: window.Lx?.drill?.state?.stage ?? null,
+        score: v?.querySelector('.result-score')?.textContent?.trim() || null,
+        pct: v?.querySelector('.result-ring-num')?.textContent?.trim() || null,
+        bands: v ? v.querySelectorAll('.meter').length : -1,
+        estimate: !!v?.querySelector('.result-estimate'),
+      };
+    })()
+  `).catch((e) => ({ error: e.message }));
+  if (assessState.stage === 'result' && assessState.bands >= 2 && assessState.estimate) {
+    console.log(`[shot] ✓ 水平检测出结果：${assessState.score} · ${assessState.pct} · ${assessState.bands} 个分层`);
+  } else {
+    console.error('[shot] ✗ 水平检测没走到结果页', assessState);
+  }
+
+  /* ---- 生词本的自有释义与笔记 ----
+   *
+   * 重点验的是「词库里没有的词组也能加进来、并且一路带到复习卡上」。
+   * 这条链路以前根本不存在：查不到的词没有收藏按钮，note 那一列也没人写过。
+   */
+  await setTheme('paper');
+  await view('wordbook');
+  {
+    const phrase = 'replay buffer';
+    const added = await mainWin.webContents.executeJavaScript(`
+      window.lexica.wbAdd({
+        word: ${JSON.stringify(phrase)},
+        myDef: '经验回放缓冲：存放历史转移的池子',
+        note: 'RL 课第三周，别和 policy 混起来',
+      })
+    `).catch((e) => ({ error: e.message }));
+    console.log('[shot] 手动添加词组', added);
+
+    // 词库里真的没有这个词组，否则这条验证就没意义了
+    const inDict = await mainWin.webContents.executeJavaScript(
+      `(async () => (await window.lexica.wbGet(${JSON.stringify(phrase)})).inDict)()`,
+    ).catch(() => null);
+    if (inDict) console.error('[shot] ✗ 词库里居然有这个词组，换一个再测');
+
+    await view('wordbook');
+    await wait(900);
+
+    /* 列表行要显示自己写的释义与笔记，并标出「词库无」。
+       查 DOM 而不是看截图——虚拟列表 + 未前置窗口的截图都不可靠。 */
+    const rowState = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const box = document.querySelector('#view-wordbook');
+        const rows = [...(box?.querySelectorAll('.wb-item') || [])];
+        const it = rows.find((r) => r.dataset.word === ${JSON.stringify(phrase)});
+        return {
+          rows: rows.length,
+          found: !!it,
+          text: it ? it.querySelector('.wb-tr')?.textContent.trim() : null,
+          flags: it ? [...it.querySelectorAll('.custom-flag')].map((f) => f.textContent.trim()) : [],
+          hasEdit: !!it?.querySelector('[data-act="wb-edit"]'),
+        };
+      })()
+    `).catch((e) => ({ error: e.message }));
+
+    if (rowState.found && rowState.text?.includes('经验回放缓冲')
+      && rowState.text.includes('RL 课第三周') && rowState.hasEdit) {
+      console.log(`[shot] ✓ 生词本行显示自有释义与笔记｜标记 ${rowState.flags.join(',')}`);
+    } else {
+      console.error('[shot] ✗ 生词本行不对', rowState);
+    }
+
+    // 点开编辑框，内容要能读回来
+    await click(`[data-act="wb-edit"][data-word="${phrase}"]`, 800);
+    const edState = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const f = document.querySelector('#wbForm');
+        return {
+          open: !!f,
+          word: document.querySelector('#wbWord')?.value || null,
+          def: document.querySelector('#wbDef')?.value || null,
+          note: document.querySelector('#wbNote')?.value || null,
+          warn: document.querySelector('.wb-form-hint.is-warn')?.textContent.trim() || null,
+        };
+      })()
+    `).catch((e) => ({ error: e.message }));
+    if (edState.open && edState.def?.includes('经验回放缓冲') && edState.note?.includes('RL 课')) {
+      console.log('[shot] ✓ 编辑框回填正确' + (edState.warn ? '，并提示词库无此条' : ''));
+    } else {
+      console.error('[shot] ✗ 编辑框回填不对', edState);
+    }
+    await shot('42-wordbook-editor');
+
+    /* 「我写过的」筛选——用户要「完整查看自己加的东西」靠这个 */
+    await click('[data-act="wb-filter"][data-filter="noted"]', 800);
+    const noted = await mainWin.webContents.executeJavaScript(
+      "document.querySelectorAll('#view-wordbook .wb-item').length",
+    ).catch(() => -1);
+    if (noted >= 1) console.log(`[shot] ✓ 「我写过的」筛出 ${noted} 条`);
+    else console.error('[shot] ✗ 「我写过的」筛选没结果', noted);
+    await click('[data-act="wb-filter"][data-filter="all"]', 600);
+
+    /* 复习卡上也要出现——词库里没有这个词组，自己写的释义是卡片上唯一的释义。
+       这一条最容易漏：wb:due 原先只查词库，卡片会一个字都没有。 */
+    const due = await mainWin.webContents.executeJavaScript(
+      `(async () => {
+         const q = await window.lexica.wbDue(200);
+         const it = q.find((x) => x.card.word === ${JSON.stringify(phrase)});
+         return it ? { myDef: it.myDef, note: it.note, entry: !!it.entry } : null;
+       })()`,
+    ).catch((e) => ({ error: e.message }));
+    if (due?.myDef?.includes('经验回放缓冲')) {
+      console.log('[shot] ✓ 复习队列带着自有释义');
+    } else {
+      console.error('[shot] ✗ 复习队列里没有自有释义', due);
+    }
+
+    /* 词条页的「我的」区块。这里用一个词库里真有的词，
+       验证注释是**叠加**在词库释义之上，而不是把词条替换掉。 */
+    await mainWin.webContents.executeJavaScript(`
+      window.lexica.wbAnnotate({ word: 'policy', myDef: '策略（不是政策）', note: '强化学习语境' })
+    `).catch(() => {});
+    await lookup('policy');
+    await wait(600);
+    const entryState = await mainWin.webContents.executeJavaScript(`
+      (() => {
+        const box = document.querySelector('#view-dict');
+        return {
+          mineDef: box?.querySelector('.mine-def')?.textContent.trim() || null,
+          mineNote: box?.querySelector('.mine-note')?.textContent.trim() || null,
+          // 词库释义必须还在——注释是叠加，不是替换
+          dictSenses: box ? box.querySelectorAll('.zh-line').length : 0,
+        };
+      })()
+    `).catch((e) => ({ error: e.message }));
+    if (entryState.mineDef?.includes('策略') && entryState.dictSenses > 0) {
+      console.log(`[shot] ✓ 词条页「我的」区块在，词库释义仍有 ${entryState.dictSenses} 条`);
+    } else {
+      console.error('[shot] ✗ 词条页的注释区块不对', entryState);
+    }
+    await shot('43-entry-mine');
+
+    /* 查不到页要有「加进生词本」的出口——用户原来在这里是死路 */
+    mainWin.webContents.send('nav:lookup', { word: 'zzzqqq' });
+    await wait(900);
+    const missHas = await mainWin.webContents.executeJavaScript(
+      "!!document.querySelector('#view-dict [data-act=\"wb-edit\"]')",
+    ).catch(() => false);
+    if (missHas) console.log('[shot] ✓ 查不到页有加入生词本的出口');
+    else console.error('[shot] ✗ 查不到页仍然是死路');
+  }
+
+  // 复习页的学习热力图
+  await view('review');
+  await shot('23-heatmap');
+
+  await view('wordbook');
+  await shot('24-wordbook-virtual');
+
+  if (stalePngs) console.error(`[shot] ✗ 有 ${stalePngs} 张截图是旧帧，看图不作数`);
+  console.log('[shot] 完成，输出目录：', dir);
+  quitting = true;
+  app.exit(stalePngs ? 1 : 0);
+}
+
+function broadcast(channel, payload) {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send(channel, payload);
+  }
+}
+
+/* ========================================================================== */
+/*  启动                                                                       */
+/* ========================================================================== */
+
+app.on('second-instance', (_e, argv) => {
+  const word = argv.find((a) => /^[A-Za-z][A-Za-z'-]{1,40}$/.test(a));
+  focusMain(word);
+});
+
+/**
+ * 让渲染层的 getDisplayMedia 能直接拿到系统声音（网课、录播用）。
+ *
+ * Windows 上抓系统输出只能走 loopback，而 loopback 只在 getDisplayMedia
+ * 这条路上提供。默认行为会弹出「选择共享内容」的窗口——上课前每次都点一遍太烦，
+ * 这里直接回一个屏幕源 + loopback 音频，不弹窗。
+ *
+ * 只给音频用：渲染层拿到流后立刻把视频轨停掉并移除（见 lecture.js 的 openStream）。
+ * 这里没有把画面送去任何地方，也不录屏。
+ */
+function installDisplayMediaHandler() {
+  const { session, desktopCapturer } = require('electron');
+  try {
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+        if (!sources.length) return callback({});
+        return callback({ video: sources[0], audio: 'loopback' });
+      }).catch((e) => {
+        console.error('[lecture] 取系统声音失败：', e.message);
+        callback({});
+      });
+    }, { useSystemPicker: false });
+  } catch (e) {
+    console.warn('[lecture] 这个 Electron 版本不支持 setDisplayMediaRequestHandler：', e.message);
+  }
+}
+
+app.whenReady().then(() => {
+  installDisplayMediaHandler();
+  app.setAppUserModelId('com.lexica.dictionary');
+
+  const shotDir = process.env.LEXICA_SHOT;
+  if (shotDir) {
+    // 截图模式用独立的用户数据目录，避免污染真实生词本
+    app.setPath('userData', path.join(require('node:os').tmpdir(), 'lexica-shot-profile'));
+  }
+
+  logger.init(app.getPath('userData'));
+
+  user = new UserDB(app.getPath('userData'));
+  settings = user.allSettings(DEFAULTS);
+
+  const dataDir = path.dirname(resolveDictPath());
+  // 模型和词库放一起：开发时 data/model，打包后 resources/data/model
+  translator = new Translator(path.join(dataDir, 'model'), { model: settings.mtModel });
+  // 启动后台预热，第一次划词就不用等模型现加载
+  if (translator.available) setTimeout(() => translator.warmup(), 2000);
+
+  /* 语音识别不在启动时拉起：whisper-server 常驻要占几百 MB 内存和一个端口，
+     只有真的开始上课记录时才值得。这里只构造，start() 由界面触发。
+     maxChunkSec 必须与渲染层 VadChunker 的 maxMs 一致——它决定 audio-ctx。 */
+  asr = new AsrEngine(path.join(dataDir, 'asr'), { maxChunkSec: LECTURE_MAX_CHUNK_SEC });
+  lectures = new LectureRecorder(path.join(app.getPath('userData'), 'lectures'));
+
+  if (shotDir) {
+    settings.theme = 'paper';
+    // 给生词本塞几个词，截图里才有内容
+    for (const w of ['ephemeral', 'meticulous', 'ubiquitous', 'serendipity', 'paradigm',
+                     'photosynthesis', 'run', 'candid', 'resilient', 'nuance']) {
+      user.toggle(w);
+    }
+    // 造一年的学习活动，热力图截图才不是全空（只影响临时的截图专用配置目录）
+    const seedLog = user.db.prepare('INSERT INTO quiz_log (at, scope, kind, word, correct) VALUES (?, ?, ?, ?, ?)');
+    const seedRev = user.db.prepare('INSERT INTO reviews (word, at, grade) VALUES (?, ?, ?)');
+    user.db.exec('BEGIN');
+    for (let back = 0; back < 360; back++) {
+      // 留出一些空白日，看起来才像真实的学习节奏
+      if (back % 7 === 3 || back % 11 === 5) continue;
+      const at = Date.now() - back * 86_400_000 + 3600_000;
+      const n = 3 + ((back * 7) % 26);
+      // 正确率随时间缓慢上升并带点波动，截图里的曲线才不是一条直线
+      const rate = 0.55 + (1 - back / 360) * 0.3 + Math.sin(back / 9) * 0.08;
+      for (let i = 0; i < n; i++) {
+        seedLog.run(at + i * 1000, 'toefl', 'en2zh', 'sample', Math.random() < rate ? 1 : 0);
+      }
+      if (back % 3 === 0) seedRev.run('sample', at, 'good');
+    }
+    user.db.exec('COMMIT');
+  }
+
+  dict = new DictDB(resolveDictPath());
+  quiz = new Quiz(dict);
+  // 自定义词表存在 user.db，跨库拿不到，用回调注入
+  quiz.setCustomSource({
+    lists: () => user.lists(),
+    words: (id) => user.listWords(id),
+  });
+  const opened = dict.open();
+  if (!opened) {
+    console.error('[dict] 打开失败：', dict.error);
+  } else {
+    console.log(`[dict] 已加载 ${dict.meta.words} 条词条，${dict.meta.senses} 条义项，${dict.meta.sentences} 条例句`);
+  }
+
+  registerIpc();
+  createMainWindow();
+  createQuickWindow();
+  buildTray();
+  // 启动时允许自动换一个可用热键，免得用户开箱就发现悬浮查词没反应
+  const hk = registerHotkey({ allowFallback: true });
+  if (hk.registered) {
+    console.log(`[hotkey] 已注册 ${hk.hotkey}${hk.fellBack ? '（原设置被占用，已自动更换）' : ''}`);
+  } else if (settings.hotkeyEnabled) {
+    console.warn('[hotkey] 注册失败：', hk.reason);
+  }
+  refreshTrayMenu(); // 热键定下来之后再刷菜单，标签才是真正生效的那个
+  if (settings.clipboardLookup) startClipboardWatch();
+  if (settings.selectionMode && settings.selectionMode !== 'off') applySelectionMode();
+
+  // 开机自启时以隐藏状态启动
+  if (process.argv.includes('--hidden')) mainWin?.once('ready-to-show', () => mainWin.hide());
+
+  if (shotDir) runShotSequence(shotDir).catch((e) => { console.error('[shot]', e); app.exit(1); });
+});
+
+app.on('window-all-closed', () => {
+  // 托盘常驻，不退出
+  if (!settings.minimizeToTray) app.quit();
+});
+
+app.on('before-quit', () => { quitting = true; });
+
+app.on('will-quit', () => {
+  stopClipboardWatch();
+  selection?.stop();
+  translator?.dispose();
+  asr?.dispose();
+  try { if (subWin && !subWin.isDestroyed()) subWin.destroy(); } catch { /* 忽略 */ }
+  // 强退时把记录收尾，别让最后几条卡在队列里
+  try { lectures?.stop(); } catch { /* 忽略 */ }
+  globalShortcut.unregisterAll();
+  dict?.close();
+  user?.close();
+});

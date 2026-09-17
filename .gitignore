@@ -1,0 +1,18 @@
+node_modules/
+dist/
+
+# Rebuilt from source corpora with `npm run data` — 2.3 GB, never committed.
+data/
+
+# Generated at build time, 383 MB.
+android/app/src/main/assets/dict.db
+
+# Android build output and machine-local SDK path.
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+*.log
+.DS_Store
+Thumbs.db

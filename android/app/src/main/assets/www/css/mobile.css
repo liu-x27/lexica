@@ -1,0 +1,172 @@
+/* ==========================================================================
+   移动端布局覆盖
+   --------------------------------------------------------------------------
+   桌面版的 CSS 原样复用，这份只改真正撑不住的部分：
+   左侧竖排导航改成底部横排、顶栏去掉窗口按钮留白、触摸目标放大、
+   悬停态换成按压态（触屏上 :hover 会粘住，点完还亮着）。
+
+   加载顺序在最后，靠后置压住前面的规则，不用 !important。
+   ========================================================================== */
+
+:root {
+  --rail-h: 58px;
+  /* 刘海屏 / 手势条的安全区。viewport-fit=cover 才会有非零值 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --topbar-h: 56px;
+}
+
+/* 手机上正文宽度本来就受屏宽限制，侧栏那套宽度约束用不上 */
+.app {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  /* 100vh 在移动浏览器里是「地址栏收起后」的高度，键盘弹出时会溢出；
+     dvh 跟着可视区实时变。留 100vh 作为老 WebView 的兜底。 */
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ---------------------------------------------------------- 底部导航 */
+
+.rail {
+  flex-direction: row;
+  justify-content: space-around;
+  align-items: stretch;
+  gap: 0;
+  height: calc(var(--rail-h) + var(--safe-bottom));
+  padding: 0 var(--sp-1) var(--safe-bottom);
+  border-right: none;
+  border-top: 1px solid var(--rule);
+  /* 键盘弹出时底栏会被顶上来盖住输入框，索性让它跟着内容走 */
+  flex: none;
+}
+
+.nav-btn {
+  flex: 1;
+  width: auto;
+  height: auto;
+  gap: 3px;
+  align-content: center;
+  border-radius: var(--r-sm);
+  /* 一格至少 44px 宽高，低于这个尺寸手指点不准 */
+  min-width: 44px;
+  padding: var(--sp-2) 0;
+}
+.nav-btn svg { width: 21px; height: 21px; }
+
+/* 标签用 ::after 渲染：paintIcons() 会覆盖 innerHTML，子元素留不住 */
+.nav-btn::after {
+  content: attr(data-label);
+  font-size: 10px;
+  font-weight: 560;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+/* 竖排时的左侧指示条挪到顶部 */
+.nav-btn.is-active::before {
+  left: 50%;
+  top: -1px;
+  width: 20px;
+  height: 2.5px;
+  transform: translateX(-50%);
+}
+
+.nav-btn .dot { top: 2px; right: calc(50% - 20px); }
+
+/* 触屏上没有真正的 hover，:hover 会在点击后粘住不散 */
+@media (hover: none) {
+  .nav-btn:hover { color: var(--ink-faint); background: none; }
+  .nav-btn.is-active:hover { color: var(--accent); background: var(--accent-soft); }
+  .suggest-item:hover { background: none; }
+  .nav-btn[data-tip]:hover::after { content: attr(data-label); }
+}
+.nav-btn:active { background: var(--surface-active); }
+
+/* ------------------------------------------------------------- 顶栏 */
+
+.topbar {
+  height: calc(var(--topbar-h) + var(--safe-top));
+  padding: var(--safe-top) var(--sp-4) 0;
+  gap: var(--sp-2);
+}
+
+.search { max-width: none; }
+.search-field {
+  height: 40px;
+  /* 小于 16px 时 WebView 会在聚焦时自动放大页面，回不去 */
+  font-size: 16px;
+}
+.search-input { font-size: 16px; }
+.kbd { display: none; }
+
+.suggest {
+  max-height: 58vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.suggest-item { padding: var(--sp-3); gap: var(--sp-2); }
+/* 一行挤不下「单词 + 音标 + 释义 + 标签」，改成两行 */
+.suggest-item { flex-wrap: wrap; }
+.suggest-tr { flex-basis: 100%; text-align: left; order: 3; }
+
+/* ------------------------------------------------------------- 内容 */
+
+.stage {
+  /* 惯性滚动 */
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: auto;
+}
+.scroll::-webkit-scrollbar { width: 0; height: 0; }
+
+.page {
+  padding: var(--sp-5) var(--sp-4) var(--sp-10);
+  gap: var(--sp-6);
+}
+
+/* 桌面版靠悬停露出的操作，在触屏上要一直可见 */
+@media (hover: none) {
+  .ex-actions, .sense-actions { opacity: 1; }
+}
+
+/* 词条头部在窄屏上换行，别把音标和按钮挤成一条 */
+.entry-head { flex-wrap: wrap; row-gap: var(--sp-3); }
+
+/* 收录统计那种成对的行，窄屏下容易挤爆，允许自己横向滚动。
+   热力图不用管：.heat-grid 本身就是横向滚动容器。 */
+.src-list { overflow-x: auto; }
+
+/* 设置项：窄屏下标题与控件竖排 */
+@media (max-width: 560px) {
+  .set-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-3);
+  }
+  .theme-picker { grid-template-columns: 1fr 1fr; }
+}
+
+/* --------------------------------------------------------- 练习与复习 */
+
+/* 题卡的内边距按桌面尺寸给的，375px 屏上会把选项挤到只剩 257px 宽 */
+.q-card { padding: var(--sp-5) var(--sp-4); }
+.q-opt { min-height: 52px; }
+/* 悬停时的位移在触屏上会在点完之后卡住不还原 */
+@media (hover: none) {
+  .q-opt:hover:not(:disabled) { transform: none; border-color: var(--rule); background: var(--surface); }
+}
+
+/* 四个评分按钮一行放不下，改成两行两列 */
+.grade-row { flex-wrap: wrap; gap: var(--sp-2); }
+.grade-btn { min-height: 52px; flex: 1 1 calc(50% - var(--sp-2)); }
+
+/* 长按选中文字在词典里没意义，反而容易误触发系统的复制菜单；
+   但例句和释义要允许选中（用户可能想复制），所以只关掉交互元素。 */
+.nav-btn, .btn, .icon-btn, .seg-btn, .q-opt, .grade-btn, .badge {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 点击时的蓝色高亮块在深色主题下很难看 */
+* { -webkit-tap-highlight-color: transparent; }
