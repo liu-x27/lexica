@@ -13,6 +13,8 @@ build come from the same source tree, bridged by a minimal CommonJS runtime and 
 *[中文说明见 README.zh-CN.md](README.zh-CN.md) — the app's own UI is Chinese; this file
 is the engineering overview.*
 
+![An entry: senses grouped by part of speech, WordNet glosses, examples, frequency ranks](docs/screenshots/entry.png)
+
 ## The dictionary
 
 Four open corpora — ECDICT, WordNet, Tatoeba and GCIDE — merged into one 814 MB SQLite
@@ -36,6 +38,13 @@ first place.
 
 Live bilingual subtitles for a lecture, taken from the microphone, from system audio, or
 from an imported recording, written to a file as they go. Entirely offline.
+
+![Live captions: timestamped English lines from whisper.cpp, Chinese under each](docs/screenshots/live-captions.png)
+
+The English line is what the system is judged on. The Chinese under it comes from a
+117 MB local `opus-mt` model and is a rough gloss — good enough to follow along, wrong
+often enough that the transcript keeps both languages rather than replacing one with the
+other.
 
 Getting it usable took three changes:
 
