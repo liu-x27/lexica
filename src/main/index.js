@@ -24,8 +24,14 @@ const {
 const { AsrEngine } = require('./asr');
 const { LectureRecorder } = require('./lecture');
 
-/* 单实例：第二次启动只唤起已有窗口 */
-if (!app.requestSingleInstanceLock()) {
+/* 单实例：第二次启动只唤起已有窗口。
+ *
+ * 截图模式例外。打包版 Lexica 常驻托盘，这个锁会让 `LEXICA_SHOT=... electron .`
+ * 在 requestSingleInstanceLock 这一行就 exit(0) 退出——没有窗口、没有输出、退出码还是 0，
+ * 看起来完全像是「这台机器起不了 GUI」，实际只是被自己那个正在跑的实例挡住了。
+ * 截图模式本来就用独立的临时 userData（见 app.whenReady 里的 setPath），
+ * 和正式实例并存不会碰到真实生词本，所以直接跳过这个锁。 */
+if (!process.env.LEXICA_SHOT && !app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }

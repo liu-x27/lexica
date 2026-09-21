@@ -12,6 +12,7 @@
     "build:db": "node --no-warnings --max-old-space-size=6144 scripts/build-db.mjs",
     "data": "npm run fetch && npm run build:db",
     "test": "node --no-warnings --test \"test/**/*.test.mjs\"",
+    "shot": "node --no-warnings scripts/shot.mjs",
     "check:bom": "node scripts/check-bom.mjs",
     "fetch:model": "node --no-warnings scripts/fetch-model.mjs",
     "fetch:model:nllb": "node --no-warnings scripts/eval-mt-candidates.mjs --fetch nllb",
