@@ -1402,7 +1402,7 @@ function registerIpc() {
       lec.queue.shift();
       lec.dropped += 1;
     }
-    lec.queue.push({ audio, startMs });
+    lec.queue.push({ audio, startMs, queuedAt: Date.now() });
     drainLecture();
   });
 
@@ -1410,8 +1410,20 @@ function registerIpc() {
     if (lec.busy || !lec.queue.length || !lectures.active) return;
     lec.busy = true;
     const job = lec.queue.shift();
+    /* 分段计时。
+     *
+     * 「字幕慢」有四个来源，靠感觉分不清是哪一个：
+     *   1. 等说话人停顿（VAD 要 420ms 静音才切，或攒到 9 秒强切）
+     *   2. 排队（上一块还在识别）
+     *   3. 识别
+     *   4. 翻译
+     * 只有 3 和 4 换在线服务能改善，而 1 往往是最大的一项。
+     * 没有这组数字就会去优化错的东西。 */
+    const tQueued = job.queuedAt || Date.now();
+    const tStart = Date.now();
     try {
       const r = await asr.transcribe(job.audio, { baseMs: job.startMs });
+      const asrMs = Date.now() - tStart;
 
       /* whisper 会把一个音频块再切成好几个 segment（按它自己的换行规则），
          这些内部切分必须合回一条——句子边界已经由 VAD 决定了。
@@ -1433,6 +1445,19 @@ function registerIpc() {
 
       const id = lectures.addSegment({ t0, t1, en: text });
       lecSend('lec:segment', { id, t0, t1, en: text });
+
+      /* 字幕出现时，这句话已经说完多久了。
+         这才是用户感受到的延迟——不是识别耗时。 */
+      const audioMs = (job.audio.length / 16000) * 1000;
+      lec.lastLatency = {
+        chunkSec: +(audioMs / 1000).toFixed(1),
+        waitMs: tStart - tQueued,      // 排队
+        asrMs,
+        words: text.split(/\s+/).length,
+      };
+      console.log(`[lat] 块 ${lec.lastLatency.chunkSec}s`
+        + ` 排队 ${lec.lastLatency.waitMs}ms 识别 ${asrMs}ms`
+        + ` (${lec.lastLatency.words} 词)`);
 
       // 翻译不阻塞下一块音频的识别，两个进程天然并行
       translateSegment(id, text);
@@ -1457,10 +1482,13 @@ function registerIpc() {
       lecSend('lec:translated', { id, zh: null, reason: '未安装翻译模型' });
       return;
     }
+    const t0 = Date.now();
     const r = await translator.translate(text);
+    const mtMs = Date.now() - t0;
     const zh = r && r.ok ? fixTerms(text, r.text) : null;
     lectures.setTranslation(id, zh);
     lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
+    console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词, ${translator.model})`);
   }
 
   handle('lec:stop', async () => {
@@ -1528,7 +1556,7 @@ function registerIpc() {
       for (const cut of vad.push(part)) {
         /* 走和渲染层完全一样的入队路径，包括积压丢弃逻辑。
            直接调 drainLecture 会绕开那部分，验证就不完整了。 */
-        lec.queue.push({ audio: cut.pcm, startMs: cut.startMs });
+        lec.queue.push({ audio: cut.pcm, startMs: cut.startMs, queuedAt: Date.now() });
         fed += 1;
         drainLecture();
       }
@@ -1536,7 +1564,7 @@ function registerIpc() {
     }
     const tail = vad.flush();
     if (tail) {
-      lec.queue.push({ audio: tail.pcm, startMs: tail.startMs });
+      lec.queue.push({ audio: tail.pcm, startMs: tail.startMs, queuedAt: Date.now() });
       fed += 1;
       drainLecture();
     }

@@ -39,6 +39,18 @@ too. The flag is the `weak` column in `words`; search ranking and the spell-corr
 candidate pool both order on it rather than filtering, which is what keeps exact lookup
 working.
 
+![A weak entry: recieve resolves, flagged as a probable misspelling, with no frequency, syllabus or WordNet record](docs/screenshots/weak-entry-demoted.png)
+
+`recieve` is a real ECDICT row, and the four signals are all absent — the panel on the
+right reads 低频/专业词 with zero English senses. So it resolves, and it says why it is
+unlikely to be what you meant.
+
+![A strong entry: children redirects to child, which carries frequency rank 114, four syllabus tags and Collins 5](docs/screenshots/strong-entry-ranked.png)
+
+`children` redirects to `child`, where every signal is present: rank #114 in the combined
+frequency list, #115 in COCA, #114 in BNC, four syllabus tags, Collins 5. Same lookup
+path, opposite side of the rule.
+
 **No native modules.** SQLite is Node's built-in `node:sqlite`, not `better-sqlite3`.
 FTS5, the trigram tokenizer and custom functions all work through it, which means the
 app installs on a machine with no MSVC build tools — the reason for the choice in the
