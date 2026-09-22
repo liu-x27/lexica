@@ -2981,6 +2981,18 @@ function termRe(term) {
  * @param text  英文原文
  * @param rows  术语表条目 [{ term, surface, zh, wrong: string[] }]
  */
+/** 数英文里这个术语出现了几次（整词、认复数和所有格）。前导空格吃掉、尾部只看不吃，连着出现也数得全 */
+const COUNT_CACHE = new Map();
+function countTerm(hay, term) {
+  let re = COUNT_CACHE.get(term);
+  if (!re) {
+    const esc = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|\\s)${esc}(?:s|es|'s)?(?=[\\s.,;:!?)\\]]|$)`, 'g');
+    COUNT_CACHE.set(term, re);
+  }
+  return (hay.match(re) || []).length;
+}
+
 function matchTerms(text, rows) {
   if (!text || !rows?.length) return [];
   const hay = ` ${norm(text)} `;
@@ -2988,26 +3000,40 @@ function matchTerms(text, rows) {
   for (const r of rows) {
     /* 用空格包边做整词匹配：不加的话 `policy` 会命中 `policymaker`，
        `ai` 会命中句子里几乎每个含这两个字母的词。 */
-    if (hay.includes(` ${r.term} `) || termRe(r.term).test(hay)) hits.push(r);
+    if (hay.includes(` ${r.term} `) || termRe(r.term).test(hay)) {
+      /* 返回副本，带上英文里出现的次数（替换时要比对，见 applyGlossary）。
+         不改原条目：它是术语表缓存里的那一份。 */
+      hits.push({ ...r, count: Math.max(1, countTerm(hay, r.term)) });
+    }
   }
   // 长术语优先：替换时先处理它，避免被短术语切开
   return hits.sort((a, b) => b.term.length - a.term.length);
 }
 
 /**
+ * 可有可无的尾字：中文术语末尾的这些量词/后缀，机器翻译有时带、有时不带
+ * （缓冲器 / 缓冲、存储区 / 存储）。只有它们可以削。
+ */
+const OPTIONAL_SUFFIX = new Set([...'器区库池机法式化性率表体网图']);
+
+/**
  * 错译写法的候选：原形，以及去掉最后一个字的形式。
  *
  * 为什么要去掉一个字：探测拿到的写法常常比译文里实际出现的多一个尾字。
  * 实测 `replay buffer` 探到「反弹缓冲器」，而句子里出现的是「反弹缓冲」——
- * 差一个「器」，整条术语就白配置了。中文译名的尾部量词/后缀
- * （器、区、性、的）本来就是可有可无的。
+ * 差一个「器」，整条术语就白配置了。
  *
- * 只削一个字，且削完必须还有三个字。放宽会出事：
- * 「反弹缓冲器」一路削成「反弹」，那两个字在别的句子里也会出现。
+ * **只削 OPTIONAL_SUFFIX 里的字**，且削完必须还有三个字。原先任何尾字都削，
+ * 导入起步包后实测出了事：`experience replay` 探到「经验重放」，削成「经验重」，
+ * 匹配到了另一个词「经验重播」的前半截，改完剩下「经验回放播」。
+ * 「放」是词本身的一部分，不是可有可无的后缀。
  */
 function withTrimmed(w) {
-  return w.length >= 4 ? [w, w.slice(0, -1)] : [w];
+  return w.length >= 4 && OPTIONAL_SUFFIX.has(w[w.length - 1]) ? [w, w.slice(0, -1)] : [w];
 }
+
+/** 数 sub 在 s 里不重叠地出现了几次 */
+const occurrences = (s, sub) => (sub ? s.split(sub).length - 1 : 0);
 
 /**
  * 把译文里的错译写法换成用户指定的译名。
@@ -3021,26 +3047,56 @@ function applyGlossary(zh, hits) {
   const applied = [];
   if (!out || !hits?.length) return { text: out, applied };
 
+  /* 每条术语的候选写法（含削尾字的），先全部算出来：
+     下面判断「这个写法是不是好几个术语都认领」要看全体。 */
+  const candOf = new Map();
   for (const h of hits) {
-    if (out.includes(h.zh)) continue;   // 模型已经译对了，别动
-
     /* 候选错译写法按长度倒序：同一个术语可能有「价值功能」和「功能」两种错法，
        先换长的，否则短的会把长的切碎。 */
     const forms = [...new Set((h.wrong || []).filter(Boolean))]
-      .sort((a, b) => b.length - a.length);
-
-    let done = false;
-    for (const w of forms) {
-      if (done) break;
-      if (w === h.zh) continue;
+      .sort((a, b) => b.length - a.length)
       /* 只挡单字错法。中文术语绝大多数是两个字（政策、策略、缓冲），
          门槛设到三个字会把最常见的情况全堵死——这是写测试时发现的。
-         单字（「能」「量」「数」）在中文里到处都是，拿来替换会把整句改烂，
-         而两字以上配合「英文原文里必须出现这个术语」那道门槛已经足够安全。 */
-      if (w.length < 2) continue;
+         单字（「能」「量」「数」）在中文里到处都是，拿来替换会把整句改烂。 */
+      .filter((w) => w !== h.zh && w.length >= 2);
+    candOf.set(h, forms.map((w) => withTrimmed(w)));
+  }
 
-      for (const cand of withTrimmed(w)) {
-        if (!out.includes(cand)) continue;
+  /* 共用的错法只归最通用（最短）的那个术语。
+   *
+   * 导入起步包后实测：on-policy 和 policy 探到的错法都是「政策」。原译文把 on-policy
+   * 和 off-policy 都含糊地译成「政策性的」，按 on-policy 全换之后变成了
+   * 「Q 学习是同策略性的」——Q 学习明明是异策略。原文只是含糊，改完变成了错的。
+   * 一个写法被好几个术语认领时，它对应的是哪个词无从判断；
+   * 归给最通用的那个最不容易造出「更具体但是错的」说法。一样长的就谁都不给。 */
+  const owner = new Map();
+  for (const h of hits) {
+    for (const group of candOf.get(h)) {
+      for (const w of group) {
+        const prev = owner.get(w);
+        if (!prev) owner.set(w, { h, tie: false });
+        else if (h.term.length < prev.h.term.length) owner.set(w, { h, tie: false });
+        else if (h.term.length === prev.h.term.length && h !== prev.h) prev.tie = true;
+      }
+    }
+  }
+  const mayUse = (w, h) => { const o = owner.get(w); return o && o.h === h && !o.tie; };
+
+  for (const h of hits) {
+    if (out.includes(h.zh)) continue;   // 模型已经译对了，别动
+
+    let done = false;
+    for (const group of candOf.get(h)) {
+      if (done) break;
+      for (const cand of group) {
+        if (!mayUse(cand, h)) continue;
+        const n = occurrences(out, cand);
+        if (!n) continue;
+        /* 错法在译文里出现的次数不能比英文原词多。
+           实测 backpropagation 探到「反向」，原译文「反向反向分析」里出现两次，
+           英文只有一次——对不上号，说明这个写法不是这个词专属的，
+           全换掉就成了「反向传播反向传播分析」。 */
+        if (n > (h.count || 1)) continue;
         out = out.split(cand).join(h.zh);
         applied.push({ term: h.surface, from: cand, to: h.zh });
         done = true;   // 一个术语只改一次，改完就走

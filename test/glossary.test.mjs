@@ -293,3 +293,74 @@ describe('尾字差一个也要认', () => {
     assert.equal(applyGlossary('我们用反弹缓。', hits).text, '我们用反弹缓。');
   });
 });
+
+/* 下面三组是导入起步包后用本地 opus 实测踩出来的，句子和译文都是模型的原样输出。
+   原先的实现把它们都「修」坏了，而且坏得比不修还糟。 */
+describe('起步包实测踩出的误改', () => {
+  /* 错法「反向」在译文里出现两次，英文 backpropagation 只有一次——
+     对不上号，说明这个错法不是这个词专属的，全换掉就成了「反向传播反向传播」。 */
+  test('错法出现的次数比英文原词多时不动', () => {
+    const t = { term: 'backpropagation', surface: 'backpropagation', zh: '反向传播', wrong: ['反向'] };
+    const en = 'Backpropagation computes the gradient of the loss with respect to every weight.';
+    const zh = '反向反向分析计算每重损失的梯度。';
+    assert.equal(applyGlossary(zh, matchTerms(en, [t])).text, zh);
+  });
+
+  test('次数对得上时照常替换（英文出现两次、错法出现两次）', () => {
+    const t = { term: 'policy', surface: 'policy', zh: '策略', wrong: ['政策'] };
+    const r = applyGlossary('这项政策和那项政策。', matchTerms('The policy and the policy again.', [t]));
+    assert.equal(r.text, '这项策略和那项策略。');
+  });
+
+  /* 截尾字只该处理「缓冲器 / 缓冲」这种可有可无的量词后缀。
+     「经验重放」的「放」是词本身的一部分，削掉之后「经验重」匹配到了
+     另一个词「经验重播」的前半截，剩下一个「播」挂在那里。 */
+  test('截尾字只削可有可无的后缀，不削词本身的字', () => {
+    const t = { term: 'experience replay', surface: 'experience replay', zh: '经验回放', wrong: ['经验重放'] };
+    const en = 'Deep Q-networks use experience replay and a target network.';
+    const zh = '深Q网络使用经验重播和目标网络。';
+    const r = applyGlossary(zh, matchTerms(en, [t]));
+    assert.ok(!r.text.includes('经验回放播'), `削出了残字：${r.text}`);
+    assert.equal(r.text, zh);
+  });
+
+  test('可有可无的后缀照样能削（原先那个 replay buffer 的例子）', () => {
+    const t = { term: 'replay buffer', surface: 'replay buffer', zh: '经验回放缓冲区', wrong: ['反弹缓冲器'] };
+    const r = applyGlossary('我们将使用反弹缓冲训练策略。', matchTerms('We train with a replay buffer.', [t]));
+    assert.equal(r.text, '我们将使用经验回放缓冲区训练策略。');
+  });
+
+  /* 最严重的一例：on-policy 和 policy 探到的错法都是「政策」。原译文把 on-policy 和
+     off-policy 都含糊地译成「政策性的」；按 on-policy 全换之后变成了
+     「Q 学习是同策略性的」——Q 学习明明是异策略。原文只是含糊，改完变成了错的。 */
+  test('几个术语共用同一个错法时，只归最通用的那个', () => {
+    const rows = [
+      { term: 'policy gradient', surface: 'policy gradient', zh: '策略梯度', wrong: ['政策梯度'] },
+      { term: 'on-policy', surface: 'on-policy', zh: '同策略', wrong: ['政策'] },
+      { term: 'off-policy', surface: 'off-policy', zh: '异策略', wrong: ['政策'] },
+      { term: 'policy', surface: 'policy', zh: '策略', wrong: ['政策'] },
+    ];
+    const en = 'Policy gradient methods are on-policy, while Q-learning is off-policy.';
+    const zh = '政策梯度方法是政策性的,而Q学习是政策性的。';
+    const r = applyGlossary(zh, matchTerms(en, rows));
+    assert.ok(!/同策略|异策略/.test(r.text), `把含糊改成了错的：${r.text}`);
+    assert.ok(r.text.startsWith('策略梯度'), '不相干的那条（policy gradient）照样要修');
+  });
+
+  test('共用的错法归通用词之后，通用词照常修', () => {
+    const rows = [
+      { term: 'on-policy', surface: 'on-policy', zh: '同策略', wrong: ['政策'] },
+      { term: 'policy', surface: 'policy', zh: '策略', wrong: ['政策'] },
+    ];
+    // 「政策」对应的是后半句的 the policy，不是 on-policy
+    const en = 'An on-policy method updates the policy it follows.';
+    const r = applyGlossary('一种同步方法更新了它所遵循的政策。', matchTerms(en, rows));
+    assert.equal(r.text, '一种同步方法更新了它所遵循的策略。');
+  });
+
+  test('只有一个术语认领这个错法时，长术语照常用它', () => {
+    const rows = [{ term: 'on-policy', surface: 'on-policy', zh: '同策略', wrong: ['政策'] }];
+    const r = applyGlossary('这种方法是政策性的。', matchTerms('This method is on-policy.', rows));
+    assert.equal(r.text, '这种方法是同策略性的。');
+  });
+});
