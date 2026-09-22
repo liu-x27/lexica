@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 完全离线，不申请任何网络权限 -->
+    <!-- 唯一的网络用途是在线翻译：设置里默认关，打开后才会联网。
+         关着的时候应用完全离线，词典、生词本、练习都不碰网络。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"

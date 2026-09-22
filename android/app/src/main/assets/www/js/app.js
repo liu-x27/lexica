@@ -349,20 +349,26 @@
   /*  自定义词表与词条                                                    */
   /* ==================================================================== */
 
+  /**
+   * 术语表能不能用：要有机器翻译（它修的就是机器翻译的输出），
+   * 而且平台接了术语表——安卓的在线翻译不接（探测机制在桌面主进程里），mtStatus 回 glossary:false。
+   */
+  const glossaryUsable = () => !!state.mt?.available && state.mt?.glossary !== false;
+
   const CU = () => (state.custom ||= {
     tab: 'lists', lists: [], entries: [], terms: [], draft: {}, gDraft: {}, preview: null,
   });
   const paintCustom = () => {
     /* 术语表只在装了翻译模型时才有意义——它修的就是机器翻译的输出。
        这一条同时挡掉安卓版（没内置模型）和桌面版没跑 fetch:model 的情况。 */
-    viewEl('custom').innerHTML = Lx.renderCustom({ ...CU(), mt: !!state.mt?.available });
+    viewEl('custom').innerHTML = Lx.renderCustom({ ...CU(), mt: glossaryUsable() });
   };
 
   async function loadCustom() {
     const cu = CU();
     const [lists, entries, terms] = await Promise.all([
       api.lists(), api.customAll(300),
-      state.mt?.available ? api.glossAll() : Promise.resolve([]),
+      glossaryUsable() ? api.glossAll() : Promise.resolve([]),
     ]);
     cu.lists = Array.isArray(lists) ? lists : [];
     cu.entries = Array.isArray(entries) ? entries : [];
@@ -1490,6 +1496,15 @@
           case 'toggle': {
             const key = actEl.dataset.key;
             await putSetting({ [key]: !state.settings[key] });
+            /* 开关在线翻译会改变「有没有机器翻译可用」，而 state.mt 和 state.stats
+               是启动时读的。不刷新的话：安卓（没有本地模型）打开在线翻译后，
+               查词页直到重启都不会用它；设置页的统计也一直是旧的。 */
+            if (key === 'mtOnline') {
+              [state.mt, state.stats] = await Promise.all([
+                api.mtStatus().catch(() => state.mt),
+                api.stats().catch(() => state.stats),
+              ]);
+            }
             return renderSettings();
           }
 

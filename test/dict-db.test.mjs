@@ -25,16 +25,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DB_FILE = path.join(ROOT, 'data', 'dict.db');
 const { DictDB, isSentence } = require(path.join(ROOT, 'src', 'main', 'dict-db.js'));
 
-/* splitSentences 定义在 translate.js 里，但那个文件顶上 require('electron')，
-   测试环境里没有。只把这个纯函数抠出来跑。 */
-const splitSentences = (() => {
-  const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'translate.js'), 'utf8');
-  const from = src.indexOf('/** 整段翻译的上限');
-  const to = src.indexOf('class Translator');
-  assert.ok(from > 0 && to > from, 'translate.js 的结构变了，取不出 splitSentences');
-  // eslint-disable-next-line no-new-func
-  return new Function(`${src.slice(from, to)}; return splitSentences;`)();
-})();
+/* splitSentences 原先在 translate.js 里、顶上 require('electron')，测试只能把源码按文本
+   切出来再 new Function——文件结构一变就断。现在它有了自己的纯模块，直接 require。 */
+const { splitSentences } = require(path.join(ROOT, 'src', 'main', 'sentence-split.js'));
 
 const missing = !fs.existsSync(DB_FILE);
 const skip = missing ? `词库不存在（${DB_FILE}），先运行 npm run data` : false;

@@ -545,38 +545,46 @@
               : ''
           }
           ${row('自动机器翻译', stats.mtAvailable
-            ? `词典给不出整体释义时（多为学术词组），自动补一条本地模型翻译。<br>
-               <span class="faint">结果排在逐词拆解之后并标注为机器翻译——模型在专业术语上常有偏差。</span>`
+            ? `词典给不出整体释义时（多为学术词组），自动补一条机器翻译。<br>
+               <span class="faint">结果排在逐词拆解之后并标注为机器翻译——专业术语和数字仍可能有偏差。</span>`
             : isAndroid
-              ? `安卓版没有内置翻译模型。<br>
+              ? `安卓版没有内置翻译模型，可以打开下面的「在线翻译」。<br>
                  <span class="faint">查不到的词组仍会给出逐词拆解，这部分是词典数据，比机器翻译可靠。</span>`
               : '未安装翻译模型。在项目目录运行 <span class="mono">npm run fetch:model</span> 后可用（约 117MB）。',
             stats.mtAvailable
               ? sw('mtAuto', s.mtAuto !== false)
               : '<span class="set-desc">未内置</span>')}
           ${
-            /* 在线翻译。安卓版没有这条路（也没有本地模型），整项不渲染。
-               措辞必须把两件事都说清楚：会外发什么，以及它治不了延迟。 */
-            isAndroid ? '' : row('在线翻译', `本地模型在数字和术语上会<strong>改错内容</strong>
-              （实测 <span class="mono">63.8 → 638</span>、<span class="mono">scalar reward → 一笔奖金</span>），
-              在线服务这几处都是对的。<br>
-              <span class="faint">开启后，要翻译的英文会发送到
-              ${esc((mtOnline.provider === 'google' ? 'Google' : mtOnline.provider))}
-              ——上课时那就是老师讲的内容。断网或超时会自动退回本地模型，字幕不会中断。</span><br>
-              <span class="faint">注意：这<strong>不会</strong>让字幕变快。实测延迟里翻译只占约 300ms，
-              大头是等说话人停顿，那要靠「滚动字幕」解决。</span>`,
+            /* 在线翻译。措辞必须把会外发什么说清楚。
+               桌面版还要说明它治不了字幕延迟；安卓没有字幕，也没有本地模型可以退回，
+               所以另一套说法——那边它是唯一的机器翻译，也是整个应用唯一联网的地方。 */
+            row('在线翻译', isAndroid
+              ? `查不到的词组、从别的应用分享进来的句子，用在线服务翻译。<br>
+                 <span class="faint">开启后，要翻译的英文会发送到
+                 ${esc((mtOnline.provider === 'google' ? 'Google' : mtOnline.provider))}。
+                 这是安卓版唯一会联网的地方，关掉就完全离线；断网时只是没有译文，查词不受影响。</span>`
+              : `本地模型在数字和术语上会<strong>改错内容</strong>
+                （实测 <span class="mono">63.8 → 638</span>、<span class="mono">scalar reward → 一笔奖金</span>），
+                在线服务这几处都是对的。<br>
+                <span class="faint">开启后，要翻译的英文会发送到
+                ${esc((mtOnline.provider === 'google' ? 'Google' : mtOnline.provider))}
+                ——上课时那就是老师讲的内容。断网或超时会自动退回本地模型，字幕不会中断。</span><br>
+                <span class="faint">注意：这<strong>不会</strong>让字幕变快。实测延迟里翻译只占约 300ms，
+                大头是等说话人停顿，那要靠「滚动字幕」解决。</span>`,
               sw('mtOnline', !!s.mtOnline))
           }
           ${
             /* 开着的时候把实时状态摆出来：退回本地是静默的，
                不给个地方看统计，用户没法知道自己到底用的是哪条通道。 */
-            !isAndroid && s.mtOnline && mtOnline.calls + mtOnline.errors > 0
+            s.mtOnline && mtOnline.calls + mtOnline.errors > 0
               ? row('在线翻译状态',
                 `已用 ${mtOnline.calls} 次 · 平均 ${mtOnline.avgMs}ms · 缓存命中 ${mtOnline.cacheHits} 次`
                 + (mtOnline.errors
                   ? ` · <strong>失败 ${mtOnline.errors} 次</strong>（最近：${esc(mtOnline.lastError || '')}）`
                   : ' · 无失败')
-                + (mtOnline.coolingDown ? '<br><span class="faint">连续失败已暂停一分钟，期间走本地模型。</span>' : ''),
+                + (mtOnline.coolingDown
+                  ? `<br><span class="faint">连续失败已暂停一分钟，${isAndroid ? '期间没有机器翻译' : '期间走本地模型'}。</span>`
+                  : ''),
                 '')
               : ''
           }
@@ -588,10 +596,10 @@
           <div class="label-rule"><span class="label">实时字幕</span></div>
           ${
             stats.asr?.available
-              ? row('识别模型', `听写用的模型。本机实测：快速 ≈ 5 倍实时，推荐 ≈ 3.6 倍，
-                  高精度只有 0.6 倍（跟不上实时，只适合课后转写导入的录音）。`,
+              ? row('识别模型', `听写用的模型。本机实测：最准（small，默认）约 3.7 倍实时、
+                  词错率 0.8%；均衡（base）约 13 倍、3.1%。机器吃力、字幕跟不上时再换成均衡。`,
                   `<div class="seg">${(stats.asr.models || []).map((m) => `
-                    <button class="seg-btn ${(s.asrModel || 'base') === m.key ? 'is-on' : ''}"
+                    <button class="seg-btn ${(s.asrModel || 'small') === m.key ? 'is-on' : ''}"
                             data-act="asr-model" data-v="${m.key}">${esc(m.label)}</button>`).join('')}</div>`)
               : row('识别模型', `还没有安装。在项目目录运行
                   <span class="mono">npm run fetch:asr</span>（约 90MB）后可用。`,

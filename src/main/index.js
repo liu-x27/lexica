@@ -1398,7 +1398,7 @@ function registerIpc() {
        比本地逐句快一个数量级。切句仍用本地那套规则——缩写、小数点、
        列表标记那些坑都在里面，不该为在线再写一份。 */
     if (online?.available) {
-      const { splitSentences } = require('./translate');
+      const { splitSentences } = require('./sentence-split');
       const parts = splitSentences(String(text || '').trim());
       if (!parts.length) return { ok: false, reason: '没有可翻译的句子' };
       push({ done: 0, total: parts.length });

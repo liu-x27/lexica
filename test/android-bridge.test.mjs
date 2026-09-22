@@ -388,3 +388,122 @@ test('shim 覆盖了 preload 暴露的全部接口', { skip: !hasAssets }, () =>
   const missing = names.filter((n) => !new RegExp(`\\b${n}\\s*:`).test(shim) && !new RegExp(`api\\.${n}\\s*=`).test(shim));
   assert.deepEqual(missing, [], `安卓 shim 缺少这些接口，渲染层调用时会崩`);
 });
+
+/* ====================================================================== */
+/*  在线翻译（安卓唯一联网的地方）                                         */
+/* ====================================================================== */
+
+/**
+ * 把整个 shim 拉进沙箱：数据层之外再配一个假的 Kotlin 桥（AndroidApp）和假的 fetch。
+ * 这次改动在真机上验不了（手边没有设备），能在沙箱里跑的路径都要跑到。
+ */
+function bootShim(userFile, fetchImpl) {
+  const s = bootDataLayer(userFile);
+  s.AndroidApp = {
+    appendLog() {}, toast() {}, setTheme() {}, version: () => 'test',
+    dataDir: () => '/tmp', takePendingText: () => '',
+  };
+  s.fetch = fetchImpl;
+  s.AbortController = AbortController;
+  s.setTimeout = setTimeout;
+  s.clearTimeout = clearTimeout;
+  s.Promise = Promise;
+  s.URL = URL;
+  s.encodeURIComponent = encodeURIComponent;
+  s.decodeURIComponent = decodeURIComponent;
+  s.addEventListener = () => {};
+  vm.runInContext(fs.readFileSync(path.join(WWW, 'js/lexica-shim.js'), 'utf8'), s, { filename: 'lexica-shim.js' });
+  return s;
+}
+
+/** 假的 Google 返回：[[[译文片段, 原文片段]], …] */
+function fakeGoogle(map) {
+  const calls = [];
+  const fn = async (url) => {
+    const q = decodeURIComponent(new URL(url).searchParams.get('q') || '');
+    calls.push(q);
+    const zh = q.split('\n').map((line) => map[line] || `译：${line}`).join('\n');
+    return { ok: true, status: 200, json: async () => [zh.split('\n').map((l, i, a) => [i < a.length - 1 ? `${l}\n` : l, '']), null, 'en'] };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('安卓：在线翻译默认关，关着时不发任何请求', { skip: !hasAssets || !hasDict }, async () => {
+  const f = fakeGoogle({});
+  const s = bootShim(tmpUser(), f);
+  const st = await s.lexica.mtStatus();
+  assert.equal(st.available, false, '默认必须是关的——开了就会把文本发给第三方');
+  const r = await s.lexica.mtTranslate('A scalar reward.');
+  assert.equal(r.ok, false);
+  assert.equal(f.calls.length, 0, '关着还发请求，等于偷偷外发数据');
+  s.AndroidSql._close();
+});
+
+test('安卓：打开在线翻译后查词组能拿到译文，状态跟着变', { skip: !hasAssets || !hasDict }, async () => {
+  const f = fakeGoogle({ 'A scalar reward.': '标量奖励。' });
+  const s = bootShim(tmpUser(), f);
+  await s.lexica.putSettings({ mtOnline: true });
+
+  const st = await s.lexica.mtStatus();
+  assert.equal(st.available, true);
+  assert.equal(st.localAvailable, false, '安卓没有本地模型');
+  assert.equal(st.glossary, false, '安卓不接术语表，界面要据此把那个 tab 藏起来');
+  assert.equal((await s.lexica.stats()).mtAvailable, true, '查词页的自动翻译看的是 stats');
+
+  const r = await s.lexica.mtTranslate('A scalar reward.');
+  assert.equal(r.ok, true);
+  assert.equal(r.text, '标量奖励。');
+  assert.equal(r.via, 'online');
+  s.AndroidSql._close();
+});
+
+/* 分享进来的整段文字走这条路。切句规则必须和桌面版同一套（sentence-split），
+   否则 e.g. 这类缩写会被切碎，双语对照就错位了。 */
+test('安卓：整段翻译按桌面同一套规则切句，一次请求翻完', { skip: !hasAssets || !hasDict }, async () => {
+  const f = fakeGoogle({});
+  const s = bootShim(tmpUser(), f);
+  await s.lexica.putSettings({ mtOnline: true });
+
+  const progress = [];
+  s.lexica.onMtProgress((p) => progress.push(p));
+  const r = await s.lexica.mtTranslateLong('We use e.g. a buffer. Accuracy improved to 0.91. Next.', 't1');
+  assert.equal(r.ok, true);
+  // 数组是沙箱里造的（另一个 realm），deepStrictEqual 连原型都比，得先转回来
+  assert.deepEqual(Array.from(r.sentences, (x) => x.src),
+    ['We use e.g. a buffer.', 'Accuracy improved to 0.91.', 'Next.'], 'e.g. 和 0.91 都不该被切开');
+  assert.equal(f.calls.length, 1, '三句应当一次往返');
+  assert.ok(progress.some((p) => p.token === 't1' && p.done === p.total), '要推完成进度，结果页才会动');
+  s.AndroidSql._close();
+});
+
+test('安卓：网络失败变成普通的失败返回，不会把异常甩给渲染层', { skip: !hasAssets || !hasDict }, async () => {
+  const s = bootShim(tmpUser(), async () => { throw new TypeError('Failed to fetch'); });
+  await s.lexica.putSettings({ mtOnline: true });
+  const r = await s.lexica.mtTranslate('hello there');
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /Failed to fetch/);
+  s.AndroidSql._close();
+});
+
+/* 这两条是「沙箱里全绿、装到手机上才坏」的那一类，只能靠静态检查挡住。 */
+test('安卓：清单里申请了网络权限', () => {
+  const m = fs.readFileSync(path.join(ROOT, 'android/app/src/main/AndroidManifest.xml'), 'utf8');
+  assert.match(m, /<uses-permission\s+android:name="android\.permission\.INTERNET"\s*\/>/);
+});
+
+test('安卓：页面 CSP 恰好放行在线翻译请求的那个域名', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'android/www-src/index.html'), 'utf8');
+  const csp = html.match(/Content-Security-Policy"\s+content="([^"]+)"/)?.[1] || '';
+  const connect = csp.split(';').map((x) => x.trim()).find((x) => x.startsWith('connect-src')) || '';
+
+  // 端点写在 translate-online.js 里；改了端点却忘了改 CSP，手机上会静默拿不到译文
+  const src = fs.readFileSync(path.join(ROOT, 'src/main/translate-online.js'), 'utf8');
+  const host = src.match(/https:\/\/([a-z0-9.-]+)\/translate_a\//)?.[1];
+  assert.ok(host, 'translate-online.js 里没找到翻译端点');
+  assert.ok(connect.includes(`https://${host}`), `CSP 没放行 ${host}：${connect}`);
+
+  // 只放行这一个：别图省事写成 https: 或 *，那等于整个页面想连哪儿就连哪儿
+  const allowed = connect.replace('connect-src', '').trim().split(/\s+/);
+  assert.deepEqual(allowed, [`https://${host}`], `connect-src 放得太宽：${connect}`);
+});

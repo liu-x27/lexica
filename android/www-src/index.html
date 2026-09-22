@@ -6,8 +6,11 @@
   <!-- 全部资源都在 assets 里，页面是 file:///android_asset/ 源；不放开任何远程来源。
        'self' 和 file: 两种写法都写上：file:// 源下 'self' 的匹配行为在各版本
        WebView 里并不一致，只写一种可能整页脚本被拦，表现是纯白屏没有任何报错。 -->
+  <!-- connect-src 只放行在线翻译那一个域名。桌面版的翻译请求在主进程里发，页面 CSP 管不到；
+       安卓是在这个页面里直接 fetch，这里不放行的话请求会被静默拦掉——
+       沙箱测试里没有 CSP，全绿也发现不了，只有装到手机上才会暴露。 -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; font-src 'self' file:; img-src 'self' file: data:; connect-src 'none'">
+        content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; font-src 'self' file:; img-src 'self' file: data:; connect-src https://translate.googleapis.com">
   <title>Lexica 离线词典</title>
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/base.css">
