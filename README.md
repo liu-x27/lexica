@@ -99,6 +99,72 @@ Silence-based chunking (`src/main/vad-chunker.js`) splits on pauses rather than 
 clock, adapts its threshold to the room's noise floor, and keeps a lead-in so the first
 syllable of a sentence is not clipped.
 
+### Where the latency actually goes
+
+Throughput said nothing about how far behind a caption appears, so I instrumented each
+stage and read it off a 13-chunk run of the same clip:
+
+| stage | measured | share |
+|---|---|---|
+| waiting for the speaker to pause (chunk length) | 3.2–7.7 s, median **4.8 s** | ~80% |
+| queueing | 0 ms — nothing ever backed up | 0% |
+| recognition (`small` + beam-5) | 750–1006 ms, median 920 ms | ~15% |
+| translation (local `opus-mt`) | 134–987 ms, median **300 ms** | ~5% |
+
+The thing that feels slow is the pause, not the models. Translation is 5% of it — which
+is worth knowing before reaching for a faster translator, because a faster translator
+cannot fix this.
+
+So captions now go out twice. A second `whisper.cpp` server — smaller model, pinned to 4
+threads — transcribes the *un-cut* buffer every 1.5 s and emits a provisional line
+(212–352 ms per pass, and the accurate pass showed no measurable slowdown); the accurate
+line replaces it when the speaker pauses. Provisional text is never written to the
+transcript, which the self-test asserts by comparing the journal's segment count against
+the finalised count.
+
+Two details that were not obvious. The cadence is driven by the audio callback rather
+than a timer, because Chromium throttles timers in occluded windows and "occluded" is
+exactly the case this feature exists for — a video player covering the app. And when
+speech simply stops, no final line ever arrives to replace the provisional one, so the
+capture side has to retract it explicitly; otherwise the last half-sentence sits on
+screen indefinitely, including the occasional full sentence Whisper invents out of
+trailing silence.
+
+### Optional online translation
+
+Off by default; the offline claim above is the default configuration. The local model's
+failure mode is not awkward phrasing, it is changed content — `71.2 to 63.8` came out as
+`71.2 降低至 638`, `code and checkpoints` as `密码和检查站`, and `a scalar reward` lost the
+term entirely. That is the reason the transcript keeps both languages. Routing through a
+translation service fixes all four cases I checked.
+
+Speed is roughly a wash, and swings with how warm the connection is. Measured inside the
+app across three lecture runs: online 41–524 ms over 40 calls, median 99 ms; the local
+model 72–1291 ms over 32 calls, median 162 ms. One call timed out and fell back, costing
+2.3 s for that line. None of this matters much, because translation is 5% of the
+latency — and the English line is emitted before translation is requested, so a slow or
+failed translation delays only the Chinese.
+
+It uses the endpoint the Google Translate web page uses: no key, but no SLA either, and
+not covered by the terms of the paid API. So it is opt-in, every failure falls back to
+the local model, the live-caption timeout is 1.2 s (a late caption is worth less than a
+rough one), and three consecutive failures park it for a minute rather than paying a
+timeout per sentence on a dropped connection. Provisional lines are translated at most
+once every 2.5 s, because consecutive ones are lengthening prefixes that never hit the
+cache and would otherwise spend the request budget on text that is about to be replaced.
+
+One debugging note worth recording, because I got it wrong first. The integration
+returned HTTP 429 consistently and I wrote that down as the endpoint rate-limiting me.
+It was the request path: at the same moment, for the same URL, Electron's main-process
+global `fetch` returned 429 while `net.fetch` and `node:https` both returned 200. The
+client has to be handed `net.fetch` explicitly. The self-test now asserts on which
+channel actually served the request rather than on the text, because a 429 falls back to
+the local model silently and the local output happened to be right for the sentence I
+was checking — the assertion passed while testing nothing.
+
+Because the fallback is silent, the settings page shows the call, cache-hit and failure
+counts — otherwise there is no way to tell which path a given caption came from.
+
 ## One source tree, two platforms
 
 Not the same feature set on both, and the differences are deliberate:
@@ -164,12 +230,13 @@ For Android: `npm run build:db:mobile` (a 383 MB slim database), then `npm run a
 
 ```
 src/main/        electron main process — dict-db, asr, lecture, vad-chunker,
-                 glossary, quiz, user-db, selection (Windows UI Automation)
+                 glossary, translate + translate-online, quiz, user-db,
+                 selection (Windows UI Automation)
 src/renderer/    the UI, shared verbatim with Android
 scripts/         corpus download, database build, mobile slim build, APK build,
                  MT and ASR model evaluation harnesses
 android/         Kotlin host + generated www assets
-test/            188 tests across 37 suites, node:test, no network or data required
+test/            210 tests across 42 suites, node:test, no network or data required
 ```
 
 ## Status
