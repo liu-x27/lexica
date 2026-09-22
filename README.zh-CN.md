@@ -38,7 +38,7 @@ npm install
 npm run data
 ```
 
-`npm run data` = `npm run fetch`（下载约 250 MB 原始数据）+ `npm run build:db`（合并成 `data/dict.db`）。
+`npm run data` = `npm run fetch`（下载约 800 MB 原始数据，其中两个中文维基 dump 占 541 MB）+ `npm run build:db`（合并成 `data/dict.db`）。
 国内网络下 GitHub 直连很慢，下载脚本会自动按顺序尝试 `gh-proxy.com` → `ghfast.top` →
 `ghproxy.net` → GitHub 直连 → 系统代理，并支持断点续传。
 走镜像下载完成后，脚本会回 GitHub 原站抽取头/中/尾三段做字节比对，确认镜像没有替换文件内容。
