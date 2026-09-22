@@ -4,9 +4,11 @@ A 3.4-million-entry English–Chinese dictionary and a real-time lecture caption
 both run with the network cable pulled out.
 
 The interesting parts are the constraints. 1,260 MB of merged corpora searched through
-SQLite FTS5, with a classifier that demotes 3.24 M of the 3.40 M rows below the 162 K it
-judges to be real headwords. Speech recognition moved from 0.58× to 4.0× real time by replacing ONNX Whisper
-with a resident `whisper.cpp` server. And both the Windows desktop app and the Android
+SQLite FTS5, with a rule that demotes 3.24 M of the 3.40 M rows — everything carrying no
+frequency rank, no Collins rating, no syllabus tag and no WordNet entry — below the 162 K
+that keep at least one. Audio-processing throughput went from 0.58× to 4.0× real time on
+my own hardware, by moving to a resident `whisper.cpp` server *and* bounding the encoder
+context window against chunk length; the second change is the larger half. And both the Windows desktop app and the Android
 build come from the same source tree, bridged by a minimal CommonJS runtime and a
 `node:sqlite` shim over Kotlin.
 
@@ -25,12 +27,17 @@ and exam-syllabus tags from middle school through GRE.
 
 **The weak-entry problem.** ECDICT includes a large number of misspellings and bare
 inflected forms as first-class entries. Searching naively, a query for a common word
-returns a page of near-identical junk. A classifier scores each row on where it came
-from, whether it has a real definition, and whether it reduces to another entry, and
-demotes 3.24 M of the 3.40 M rows below the 162 K that survive as headwords, while
-keeping every one reachable by exact lookup — so a typo still resolves, but never
-outranks a real word. The flag is the `weak` column in `words`, and search orders on it
-rather than filtering, which is what makes exact lookup still work.
+returns a page of near-identical junk. The fix is a rule, not a model: a row is marked
+weak when it carries no authority signal at all — no frequency rank, no Collins rating,
+no exam-syllabus tag, and no WordNet entry. That is exactly where ECDICT's
+web-aggregated misspellings (`recieve`, `wierd`) and bare inflections (`ran`, `mice`)
+land, and it demotes 3.24 M of the 3.40 M rows below the 162 K that keep at least one
+signal, while leaving every one reachable by exact lookup — so a typo still resolves,
+but ranks below the retained headwords instead of above them. Below *those*, which is
+not the same as never outranking any real word: a real word no source rated is weak
+too. The flag is the `weak` column in `words`; search ranking and the spell-correction
+candidate pool both order on it rather than filtering, which is what keeps exact lookup
+working.
 
 **No native modules.** SQLite is Node's built-in `node:sqlite`, not `better-sqlite3`.
 FTS5, the trigram tokenizer and custom functions all work through it, which means the
@@ -58,7 +65,9 @@ Getting it usable took three changes:
   is most of the speedup, but set it too small for a given chunk and the decoder
   degenerates into repeating the same phrase forever — with no error. The window is now
   derived from chunk length rather than fixed.
-- **Beam search plus domain prompting**, for a measured 0.8% WER on lecture audio.
+- **Beam search plus domain prompting**, for 0.8% WER on my own lecture recordings on my
+  own hardware — not a public benchmark and not comparable to one. The 4.0× is how fast
+  audio is processed, which is not the same as how far behind the captions run.
 
 Silence-based chunking (`src/main/vad-chunker.js`) splits on pauses rather than a fixed
 clock, adapts its threshold to the room's noise floor, and keeps a lead-in so the first
