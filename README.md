@@ -122,6 +122,19 @@ line replaces it when the speaker pauses. Provisional text is never written to t
 transcript, which the self-test asserts by comparing the journal's segment count against
 the finalised count.
 
+![Rolling captions: an italic provisional line is replaced by the accurate pass; the glossary corrects terms in the finished lines](docs/screenshots/captions.gif)
+
+The self-test, recorded. The italic line marked `···` is provisional — `Over many
+episodes it learned.` — and a few frames later the accurate pass replaces it with the
+whole sentence. It has no Chinese because provisional lines are only translated online,
+which is off by default. The finished lines show the glossary at work: with eight terms
+set up for this lecture they read 强化学习, 智能体观察了状态 and 经验回放缓冲, where the
+same audio without a glossary came out as 加强学习, 特工观察了国家 and 重播缓冲. The two
+lines it leaves wrong are recognition errors, upstream of where a glossary applies.
+
+Synthetic speech, fed at 4× by the self-test and captured every 450 ms — so this shows
+the pipeline, not real-time pacing. The latency table above is the measurement.
+
 Two details that were not obvious. The cadence is driven by the audio callback rather
 than a timer, because Chromium throttles timers in occluded windows and "occluded" is
 exactly the case this feature exists for — a video player covering the app. And when
