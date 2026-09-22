@@ -59,8 +59,9 @@ other.
 Getting it usable took three changes:
 
 - **ONNX Whisper → a resident `whisper.cpp` server.** The ONNX path ran at 0.58× real
-  time, i.e. falling behind a speaker permanently. Keeping a `whisper.cpp` process warm
-  and streaming chunks into it reaches 4.0×.
+  time, i.e. falling behind a speaker permanently. Keeping a process warm and streaming
+  chunks into it removes the per-chunk startup cost — necessary for real time, not
+  sufficient on its own.
 - **Bounding `--audio-ctx` against chunk length.** Shrinking the encoder context window
   is most of the speedup, but set it too small for a given chunk and the decoder
   degenerates into repeating the same phrase forever — with no error. The window is now
@@ -125,12 +126,22 @@ Requires Node 22+ (for `node:sqlite`) and Windows for the desktop app.
 
 ```bash
 npm install
-npm run data     # downloads ~800 MB of corpora, builds data/dict.db (1,260 MB)
-npm start
-npm test         # 188 tests, no data needed
+npm run data              # ~800 MB of corpora → data/dict.db (1,260 MB)
+npm start                 # dictionary only at this point
+npm test                  # 188 tests, no data needed
 ```
 
-`npm run data` is a one-time cost and the only step that touches the network. The
+The dictionary works after that. **Captioning and translation are separate downloads**,
+and without them the lecture view has nothing to run:
+
+```bash
+npm run fetch:asr         # whisper.cpp runtime + base model, ~90 MB
+npm run fetch:asr -- --all   # also the fast and high-accuracy models, ~330 MB
+npm run fetch:model      # opus-mt-en-zh, 118 MB — for the translation pane
+```
+
+`npm run data` is a one-time cost, and after it — plus `npm install`, plus the captioning
+assets below — lookup and captioning both run with no network at all. The
 download script falls back through `gh-proxy.com` and `ghfast.top` before hitting
 GitHub directly, which on a Chinese connection is the difference between minutes and
 hours.
