@@ -28,3 +28,17 @@ statement that happens to return a row. Every PRAGMA now goes through
 The general shape is worth keeping: an API that partitions statements by whether they
 return rows will misclassify anything whose row-returning behaviour depends on its
 arguments, and its error message will describe the partition rather than the statement.
+
+## The CSP trap
+
+Same genre as the PRAGMA one: a failure that only a device would show. Online
+translation fetches from inside the WebView page, and the page's CSP said
+`connect-src 'none'`, so the request is refused before it leaves the WebView. The vm
+sandbox the tests use has no CSP at all, so every test passed. The desktop never hit it
+either, because there the request goes out from the main process, where a page's CSP
+does not apply.
+
+Checked in Electron's renderer, which is the same Chromium: a `file://` page with the old
+CSP gets `Failed to fetch`; with the new one, a 200 and the translation. `connect-src` now
+names the translation host and nothing else, and a test ties that host to the URL in
+`translate-online.js`, so moving the endpoint fails a test rather than a phone.

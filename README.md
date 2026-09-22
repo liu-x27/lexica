@@ -191,6 +191,37 @@ was checking — the assertion passed while testing nothing.
 Because the fallback is silent, the settings page shows the call, cache-hit and failure
 counts — otherwise there is no way to tell which path a given caption came from.
 
+### Glossary starter packs, and three ways a glossary makes text worse
+
+The glossary rewrites the translator's known wrong renderings of a term with yours. It
+only acts when the English contains the term *and* the translation contains one of that
+term's wrong renderings, found by asking the model beforehand. It used to start empty;
+there are now five starter packs by course area (ML, deep learning, RL, NLP, systems),
+123 terms in all, which never overwrite a term you have already set. Everyday words
+such as *policy*, *agent* and *state* would also rewrite ordinary sentences, so they sit
+only in the RL pack, whose description says to import it for RL courses only; a test
+fails if such a word appears in a pack without that warning.
+
+Before shipping them I imported all five at once and ran thirty lecture sentences
+through the local model, the same probing as the app, and read every output. Three
+changes made the text worse than no glossary:
+
+- *backpropagation* probed as 反向, which the sentence contained twice while the English
+  contained the word once. Replacing both gave 反向传播反向传播. A rendering that occurs
+  more often than its term cannot be told apart from coincidence, so it is left alone.
+- *experience replay* probed as 经验重放. An earlier rule dropped the final character to
+  catch 缓冲器 against 缓冲, and matched 经验重 inside 经验重播, leaving 经验回放播. Only
+  optional classifier suffixes (器, 区, 库…) may be dropped now.
+- *on-policy* and *policy* both probed as 政策. The model had rendered both on-policy and
+  off-policy as a vague 政策性的; attributing that to on-policy produced "Q-learning is
+  on-policy", which is false. A rendering claimed by several matched terms now belongs
+  only to the most general of them.
+
+After the fixes the same run modifies 19 sentences, none of them damaged, and the three
+above are left as vague as the model made them or, for experience replay, corrected in
+full. The failure mode of this feature is silent — the output still reads as Chinese —
+which is why the check was reading sentences rather than counting replacements.
+
 ## One source tree, two platforms
 
 Not the same feature set on both, and the differences are deliberate:
@@ -200,15 +231,23 @@ Not the same feature set on both, and the differences are deliberate:
 | Dictionary search, entry view | ✓ | ✓ |
 | Wordbook, notes, custom lists | ✓ | ✓ |
 | Quiz / drill | ✓ | ✓ |
-| Sentence translation (`opus-mt`) | ✓ | — |
+| Sentence translation, local (`opus-mt`) | ✓ | — |
+| Sentence translation, online (opt-in) | ✓ | ✓ |
+| Glossary | ✓ | — |
 | Live lecture captions | ✓ | — |
 | Floating quick-lookup window | ✓ | — |
 
-Translation is out on Android on purpose: the model is ~90 MB and WASM inference on a
-phone is slow, so `mtStatus()` returns unavailable with a reason and phrases that miss
-fall back to a word-by-word breakdown rather than an error. Captions are out because the
-whole audio stack — capture worklet, source, subtitle window — is excluded from the
-Android bundle; nothing about it was ported and nothing pretends to be.
+Local translation is out on Android on purpose: the model is ~90 MB and WASM inference
+on a phone is slow. Online translation is in, off by default, and it is the only thing
+the app uses the network for — the `INTERNET` permission arrived with it. The page's CSP
+used to say `connect-src 'none'`, which refuses the request before it leaves the WebView
+and would have failed silently on a phone while every sandbox test passed; on the
+desktop the request goes out from the main process, where page CSP does not apply. It
+now names the one translation host, and a test ties that host to the URL in
+`translate-online.js`. The glossary stays desktop-only: its probing lives in the main
+process. Captions are out because the whole audio stack — capture worklet, source,
+subtitle window — is excluded from the Android bundle; nothing about it was ported and
+nothing pretends to be.
 
 The Android build reuses the desktop renderer verbatim. `npm run build:www` assembles
 `android/app/src/main/assets/www` from `src/renderer`, and a test asserts the shared
@@ -256,8 +295,9 @@ For Android: `npm run build:db:mobile` (a 383 MB slim database), then `npm run a
 
 ```
 src/main/        electron main process — dict-db, asr, lecture, vad-chunker,
-                 glossary, translate + translate-online, word-at,
-                 transcript-search, quiz, user-db, selection (Windows UI Automation)
+                 glossary + glossary-packs, translate + translate-online,
+                 sentence-split, word-at, transcript-search, quiz, user-db,
+                 selection (Windows UI Automation)
 src/renderer/    the UI, shared verbatim with Android
 scripts/         corpus download, database build, mobile slim build, APK build,
                  MT and ASR model evaluation harnesses
