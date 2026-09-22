@@ -65,15 +65,45 @@ Getting it usable took three changes:
   is most of the speedup, but set it too small for a given chunk and the decoder
   degenerates into repeating the same phrase forever — with no error. The window is now
   derived from chunk length rather than fixed.
-- **Beam search plus domain prompting**, for 0.8% WER on my own lecture recordings on my
-  own hardware — not a public benchmark and not comparable to one. The 4.0× is how fast
-  audio is processed, which is not the same as how far behind the captions run.
+- **Beam search plus domain prompting**, for 0.8% WER — but see the conditions below
+  before comparing that to anything.
+
+**What those two numbers were measured on.** Neither is a benchmark result.
+
+| | conditions |
+|---|---|
+| 0.58× → 4.00× | 5-second chunks, ONNX Whisper against a resident `whisper.cpp` server, my hardware |
+| 0.8% WER | one 127-word lecture clip of my own, scored by `scratchpad/asr-quality.mjs`, `small` + beam-5 + domain prompt |
+
+The shipped default is that last configuration, and it runs at **3.7×**, not 4.0× — beam
+search and prompting buy accuracy with throughput. The 4.00× is what the runtime change
+alone bought, on the faster settings. And throughput is not latency: 3.7× says audio is
+processed faster than it arrives, not how far behind a caption appears. The full
+per-configuration table, including the two settings that made WER *worse*, is in the
+[Chinese README](README.zh-CN.md#识别质量三个可调项的实测).
 
 Silence-based chunking (`src/main/vad-chunker.js`) splits on pauses rather than a fixed
 clock, adapts its threshold to the room's noise floor, and keeps a lead-in so the first
 syllable of a sentence is not clipped.
 
 ## One source tree, two platforms
+
+Not the same feature set on both, and the differences are deliberate:
+
+| | Windows | Android |
+|---|---|---|
+| Dictionary search, entry view | ✓ | ✓ |
+| Wordbook, notes, custom lists | ✓ | ✓ |
+| Quiz / drill | ✓ | ✓ |
+| Sentence translation (`opus-mt`) | ✓ | — |
+| Live lecture captions | ✓ | — |
+| Floating quick-lookup window | ✓ | — |
+
+Translation is out on Android on purpose: the model is ~90 MB and WASM inference on a
+phone is slow, so `mtStatus()` returns unavailable with a reason and phrases that miss
+fall back to a word-by-word breakdown rather than an error. Captions are out because the
+whole audio stack — capture worklet, source, subtitle window — is excluded from the
+Android bundle; nothing about it was ported and nothing pretends to be.
 
 The Android build reuses the desktop renderer verbatim. `npm run build:www` assembles
 `android/app/src/main/assets/www` from `src/renderer`, and a test asserts the shared
