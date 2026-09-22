@@ -220,14 +220,14 @@ WordNet 记录，所以之前只能按词长排，结果输 `gradient` 推的是
 npm run fetch:model
 ```
 
-下载 opus-mt-en-zh 量化模型（117MB），用 onnxruntime-node 原生推理，全程离线。
+下载 opus-mt-en-zh 量化模型（整个目录 118 MB，其中两个 onnx 权重 108 MB），用 onnxruntime-node 原生推理，全程离线。
 
 词典给不出整体释义时**自动触发**（设置里可关）。结果排在逐词拆解之后，
 用虚线框和「机器翻译 · 仅供参考」标签与人工释义区分——顺序很重要，下面的实测数据说明了原因。
 
 模型跑在独立的 `utilityProcess` 里，**不能放主进程**：ONNX 的加载与推理会长时间占住线程，
 放主进程会把 IPC 和窗口绘制一起卡死，实测连 `capturePage` 都会超时。
-启动 2 秒后后台预热，第一次划词不用等 107MB 模型现加载。
+启动 2 秒后后台预热，第一次划词不用等那 108 MB 权重现加载。
 
 实测质量（`npm run eval:mt` 可复现）：
 
@@ -304,7 +304,7 @@ npm run fetch:model
 
 ![实时字幕运行中：带时间戳的英文识别结果，每句下面一行中文](docs/screenshots/live-captions.png)
 
-截图里的中文来自 117MB 的本地 opus-mt，术语错得很明显（replay buffer → 重播缓冲）——
+截图里的中文来自本地 opus-mt，术语错得很明显（replay buffer → 重播缓冲）——
 这正是界面**始终保留英文原句**的原因，见上面「[为什么必须双语对照](#为什么必须双语对照)」。
 
 ```bash

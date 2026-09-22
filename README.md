@@ -52,7 +52,7 @@ from an imported recording, written to a file as they go. Entirely offline.
 ![Live captions: timestamped English lines from whisper.cpp, Chinese under each](docs/screenshots/live-captions.png)
 
 The English line is what the system is judged on. The Chinese under it comes from a
-117 MB local `opus-mt` model and is a rough gloss — good enough to follow along, wrong
+118 MB local `opus-mt` model and is a rough gloss — good enough to follow along, wrong
 often enough that the transcript keeps both languages rather than replacing one with the
 other.
 
