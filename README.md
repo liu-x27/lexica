@@ -3,7 +3,7 @@
 A 3.4-million-entry English–Chinese dictionary and a real-time lecture captioner that
 both run with the network cable pulled out.
 
-The interesting parts are the constraints. 814 MB of merged corpora searched through
+The interesting parts are the constraints. 1,260 MB of merged corpora searched through
 SQLite FTS5, with a classifier that demotes 3.24 M of the 3.40 M rows below the 162 K it
 judges to be real headwords. Speech recognition moved from 0.58× to 4.0× real time by replacing ONNX Whisper
 with a resident `whisper.cpp` server. And both the Windows desktop app and the Android
@@ -17,8 +17,9 @@ is the engineering overview.*
 
 ## The dictionary
 
-Four open corpora — ECDICT, WordNet, Tatoeba and GCIDE — merged into one 814 MB SQLite
-file: 1.36 M single words and 2.04 M phrases, with senses grouped by part of speech,
+Five open sources — ECDICT, WordNet, Tatoeba, GCIDE and a Chinese Wikipedia page dump
+— merged into one 1,260 MB SQLite file: 1.36 M single words and 2.04 M phrases, with
+senses grouped by part of speech,
 WordNet glosses and example sentences, inflections, frequency ranks from COCA and BNC,
 and exam-syllabus tags from middle school through GRE.
 
@@ -87,7 +88,7 @@ Requires Node 22+ (for `node:sqlite`) and Windows for the desktop app.
 
 ```bash
 npm install
-npm run data     # downloads ~250 MB of corpora, builds data/dict.db (814 MB)
+npm run data     # downloads ~800 MB of corpora, builds data/dict.db (1,260 MB)
 npm start
 npm test         # 188 tests, no data needed
 ```
