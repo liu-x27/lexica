@@ -140,8 +140,21 @@ than a timer, because Chromium throttles timers in occluded windows and "occlude
 exactly the case this feature exists for — a video player covering the app. And when
 speech simply stops, no final line ever arrives to replace the provisional one, so the
 capture side has to retract it explicitly; otherwise the last half-sentence sits on
-screen indefinitely, including the occasional full sentence Whisper invents out of
-trailing silence.
+screen indefinitely.
+
+### From caption to dictionary
+
+The two halves of the app used not to talk: a word you missed in a lecture had to be
+written down and looked up later. Clicking an English word in a live caption, a past
+transcript or the translation page now opens its entry in place, and one button adds it
+to the word book together with the sentence it came from. The word under the cursor is
+resolved with `caretRangeFromPoint` at click time rather than by wrapping every word in a
+`<span>` — a lecture is thousands of words, and the row renderer had just been
+consolidated after a hand-copied variant drifted. Past transcripts are searchable across
+lectures; a hit opens an in-app transcript view scrolled to that line, where the same
+click-to-look-up works. The self-test drives this with real mouse events
+(`sendInputEvent`), since a synthetic `click()` carries no coordinates and would test
+nothing.
 
 ### Optional online translation
 
@@ -243,8 +256,8 @@ For Android: `npm run build:db:mobile` (a 383 MB slim database), then `npm run a
 
 ```
 src/main/        electron main process — dict-db, asr, lecture, vad-chunker,
-                 glossary, translate + translate-online, quiz, user-db,
-                 selection (Windows UI Automation)
+                 glossary, translate + translate-online, word-at,
+                 transcript-search, quiz, user-db, selection (Windows UI Automation)
 src/renderer/    the UI, shared verbatim with Android
 scripts/         corpus download, database build, mobile slim build, APK build,
                  MT and ASR model evaluation harnesses
