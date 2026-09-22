@@ -4,8 +4,8 @@ A 3.4-million-entry English–Chinese dictionary and a real-time lecture caption
 both run with the network cable pulled out.
 
 The interesting parts are the constraints. 814 MB of merged corpora searched through
-SQLite FTS5, with a classifier that keeps 1.36 M misspelling and inflection rows out of
-results. Speech recognition moved from 0.58× to 4.0× real time by replacing ONNX Whisper
+SQLite FTS5, with a classifier that demotes 3.24 M of the 3.40 M rows below the 162 K it
+judges to be real headwords. Speech recognition moved from 0.58× to 4.0× real time by replacing ONNX Whisper
 with a resident `whisper.cpp` server. And both the Windows desktop app and the Android
 build come from the same source tree, bridged by a minimal CommonJS runtime and a
 `node:sqlite` shim over Kotlin.
@@ -26,8 +26,10 @@ and exam-syllabus tags from middle school through GRE.
 inflected forms as first-class entries. Searching naively, a query for a common word
 returns a page of near-identical junk. A classifier scores each row on where it came
 from, whether it has a real definition, and whether it reduces to another entry, and
-filters 1.36 M of them out of search results while keeping them reachable by exact
-lookup — so a typo still resolves, but never outranks a real word.
+demotes 3.24 M of the 3.40 M rows below the 162 K that survive as headwords, while
+keeping every one reachable by exact lookup — so a typo still resolves, but never
+outranks a real word. The flag is the `weak` column in `words`, and search orders on it
+rather than filtering, which is what makes exact lookup still work.
 
 **No native modules.** SQLite is Node's built-in `node:sqlite`, not `better-sqlite3`.
 FTS5, the trigram tokenizer and custom functions all work through it, which means the
