@@ -236,7 +236,8 @@ src/renderer/    the UI, shared verbatim with Android
 scripts/         corpus download, database build, mobile slim build, APK build,
                  MT and ASR model evaluation harnesses
 android/         Kotlin host + generated www assets
-test/            210 tests across 42 suites, node:test, no network or data required
+test/            210 tests across 42 suites, node:test, no network. 135 run on a
+                 fresh clone; the other 75 need data/dict.db from npm run data
 ```
 
 ## Status
