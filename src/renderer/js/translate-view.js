@@ -42,7 +42,7 @@
     if (!r?.sentences?.length) return '';
     return `
       ${r.truncated ? `<div class="tr-warn">${icon('alert')} ${esc(r.truncated)}</div>` : ''}
-      <div class="tr-pairs">
+      <div class="tr-pairs" data-ctx-src="整段翻译">
         ${r.sentences.map((p) => `
           <div class="tr-pair">
             <div class="tr-src">${esc(p.src)}</div>

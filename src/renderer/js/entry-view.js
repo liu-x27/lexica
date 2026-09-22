@@ -62,7 +62,7 @@
           <span class="hero-actions">
             <button class="icon-btn ${saved ? 'is-on' : ''}" data-act="bookmark"
                     title="${saved ? '从生词本移除' : '加入生词本'}">${icon('bookmark')}</button>
-            <button class="icon-btn ${mine?.note || mine?.my_def ? 'is-on' : ''}"
+            <button class="icon-btn ${mine?.note || mine?.my_def || mine?.contexts?.length ? 'is-on' : ''}"
                     data-act="wb-edit" data-word="${esc(e.word)}"
                     title="写我的释义与笔记">${icon('quote')}</button>
             <button class="icon-btn" data-act="copy" title="复制单词">${icon('check')}</button>
@@ -107,12 +107,14 @@
   function mineBlock(mine, word) {
     const def = mine?.my_def?.trim();
     const note = mine?.note?.trim();
-    if (!def && !note) return '';
+    const ctx = mine?.contexts || [];
+    if (!def && !note && !ctx.length) return '';
     return `<section class="section rise">
         <div class="label-rule"><span class="label">我的</span></div>
         <div class="mine-box">
           ${def ? `<div class="mine-def">${esc(def)}</div>` : ''}
           ${note ? `<div class="mine-note">${esc(note)}</div>` : ''}
+          ${Lx.contextList(ctx)}
           <button class="btn btn-outline" data-act="wb-edit" data-word="${esc(word)}">
             ${icon('wand')} 编辑
           </button>

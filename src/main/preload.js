@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('lexica', {
   wbAdd: (entry) => call('wb:add', entry),
   wbAnnotate: (entry) => call('wb:annotate', entry),
   wbRemove: (word) => call('wb:remove', word),
+  // 带语境收藏：点了字幕里的词、按「收进生词本」
+  wbAddContext: (entry) => call('wb:addContext', entry),
+  wbRemoveContext: (word, index) => call('wb:removeContext', { word, index }),
   wbCounts: () => call('wb:counts'),
   wbDue: (limit) => call('wb:due', limit),
   wbGrade: (word, grade) => call('wb:grade', word, grade),
@@ -85,6 +88,8 @@ contextBridge.exposeInMainWorld('lexica', {
   lecPartial: (pcm) => ipcRenderer.send('lec:partial', { pcm }),
   lecStop: () => call('lec:stop'),
   lecList: () => call('lec:list'),
+  lecSearch: (query) => call('lec:search', query),
+  lecRead: (dir) => call('lec:read', dir),
   lecOpen: (dir) => call('lec:open', dir),
   lecReveal: (file) => call('lec:reveal', file),
   lecRecover: (dir) => call('lec:recover', dir),
@@ -99,6 +104,8 @@ contextBridge.exposeInMainWorld('lexica', {
   subHide: () => call('sub:hide'),
   subToggle: (on) => call('sub:toggle', on),
   subSetLocked: (locked) => call('sub:setLocked', locked),
+  // 悬浮字幕里点词：交给悬浮查词窗，x/y 是屏幕坐标
+  subLookup: (payload) => call('sub:lookup', payload),
   onSubToggle: (fn) => on('sub:toggle', fn),
   onLecSegment: (fn) => on('lec:segment', fn),
   onLecTranslated: (fn) => on('lec:translated', fn),

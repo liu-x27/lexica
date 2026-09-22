@@ -16,7 +16,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { UserDB, SCHEMA_VERSION } = require(path.join(ROOT, 'src', 'main', 'user-db.js'));
+const { UserDB, SCHEMA_VERSION, MAX_CONTEXTS } = require(path.join(ROOT, 'src', 'main', 'user-db.js'));
 
 /** 换行符常量：测试里要拼多行文本 */
 const NL = String.fromCharCode(10);
@@ -78,7 +78,7 @@ describe('UserDB 迁移', () => {
     /* v4 是 ALTER TABLE 加列，不是建表。漏了的话写笔记会静默失败
        （UPDATE 找不到列直接抛，但只在用户真去写的时候才暴露）。 */
     const cols = db.db.prepare('PRAGMA table_info(wordbook)').all().map((c) => c.name);
-    for (const c of ['note', 'my_def', 'noted_at']) {
+    for (const c of ['note', 'my_def', 'noted_at', 'contexts']) {
       assert.ok(cols.includes(c), `wordbook 缺少列 ${c}`);
     }
     assert.equal(db.annotate('ephemeral', { note: '老库也能写' }).ok, true);
@@ -342,5 +342,95 @@ describe('生词本的自有释义与笔记', () => {
     const row = q.find((r) => r.word === 'replay buffer');
     assert.ok(row, '新加的词应当立刻到期');
     assert.equal(row.my_def, '经验回放缓冲');
+  });
+});
+
+describe('生词本的语境（在哪句话里遇到的）', () => {
+  const lec = {
+    en: 'The replay buffer breaks the correlation between consecutive samples.',
+    zh: '经验回放缓冲打破了连续样本之间的相关性。',
+    src: '强化学习导论',
+  };
+
+  test('点字幕里的词收藏：词不在就加进来，并记下这句话', () => {
+    db = new UserDB(dir);
+    const r = db.addContext('buffer', lec);
+    assert.equal(r.ok, true);
+    assert.equal(r.added, true, '应当报告这次是新加的');
+    assert.equal(db.isSaved('buffer'), true);
+    const c = db.entry('buffer').contexts;
+    assert.equal(c.length, 1);
+    assert.equal(c[0].en, lec.en);
+    assert.equal(c[0].zh, lec.zh);
+    assert.equal(c[0].src, '强化学习导论');
+    assert.ok(c[0].at > 0);
+  });
+
+  /* 语境单独一列，绝不碰用户自己写的笔记 */
+  test('不动用户的笔记', () => {
+    db = new UserDB(dir);
+    db.addWord('buffer', { note: '我自己写的', myDef: '缓冲区' });
+    db.addContext('buffer', lec);
+    const e = db.entry('buffer');
+    assert.equal(e.note, '我自己写的');
+    assert.equal(e.my_def, '缓冲区');
+    assert.equal(e.contexts.length, 1);
+  });
+
+  test('已在生词本里的词，added 为假', () => {
+    db = new UserDB(dir);
+    db.toggle('buffer');
+    assert.equal(db.addContext('buffer', lec).added, false);
+  });
+
+  test('同一句话点两次只留一条，并挪到最前面', () => {
+    db = new UserDB(dir);
+    db.addContext('buffer', lec);
+    db.addContext('buffer', { en: 'Another sentence with buffer.' });
+    db.addContext('buffer', lec);
+    const c = db.entry('buffer').contexts;
+    assert.equal(c.length, 2, '按句子去重');
+    assert.equal(c[0].en, lec.en, '最近一次的排最前');
+  });
+
+  test('最多留几条，旧的挤掉', () => {
+    db = new UserDB(dir);
+    for (let i = 0; i < MAX_CONTEXTS + 3; i++) db.addContext('buffer', { en: `Sentence number ${i}.` });
+    const c = db.entry('buffer').contexts;
+    assert.equal(c.length, MAX_CONTEXTS);
+    assert.equal(c[0].en, `Sentence number ${MAX_CONTEXTS + 2}.`, '最新的在最前');
+  });
+
+  test('没有句子时只收词，不记空语境', () => {
+    db = new UserDB(dir);
+    db.addContext('buffer', { en: '   ' });
+    assert.equal(db.isSaved('buffer'), true);
+    assert.deepEqual(db.entry('buffer').contexts, []);
+  });
+
+  test('逐条删除，删空后是空数组', () => {
+    db = new UserDB(dir);
+    db.addContext('buffer', { en: 'First.' });
+    db.addContext('buffer', { en: 'Second.' });
+    db.removeContext('buffer', 0);
+    assert.deepEqual(db.entry('buffer').contexts.map((c) => c.en), ['First.']);
+    db.removeContext('buffer', 0);
+    assert.deepEqual(db.entry('buffer').contexts, []);
+  });
+
+  test('列表、到期队列、导出用的全量都带着解开的语境', () => {
+    db = new UserDB(dir);
+    db.addContext('buffer', lec);
+    assert.equal(db.list({ limit: 10 })[0].contexts[0].en, lec.en);
+    assert.equal(db.dueQueue(10)[0].contexts[0].en, lec.en);
+    assert.equal(db.allWords()[0].contexts[0].en, lec.en);
+  });
+
+  test('坏 JSON 不能让整行读不出来', () => {
+    db = new UserDB(dir);
+    db.toggle('buffer');
+    db.db.exec("UPDATE wordbook SET contexts = 'not json'");
+    assert.deepEqual(db.entry('buffer').contexts, []);
+    assert.equal(db.list({ limit: 10 }).length, 1);
   });
 });

@@ -71,6 +71,10 @@ class LectureRecorder {
   constructor(root) {
     this.root = root;
     this.session = null;
+    /* 转写稿解析缓存：dir → { mtimeMs, size, data }。
+       搜索每敲一个字就要扫全部课程，不缓存的话每次都要重新解析几万行 JSON。
+       用 mtime + size 判断是否过期——正在录的那节课一直在追加，自然会重读。 */
+    this._cache = new Map();
   }
 
   get active() { return !!this.session; }
@@ -322,6 +326,55 @@ class LectureRecorder {
       });
     }
     return out.sort((a, b) => b.at - a.at).slice(0, limit);
+  }
+
+  /**
+   * 读一节课的全部定稿（应用内查看、搜索都用它）。
+   *
+   * 只读流水账，不读 md/json 成品：成品可能没生成（上次崩了），
+   * 流水账是一直在写的那份，最全。
+   *
+   * @returns {Promise<{dir, title, startedAt, segments:[{id,t0,t1,en,zh}]}|null>}
+   */
+  async loadTranscript(dir) {
+    const jf = path.join(dir, 'journal.jsonl');
+    let st;
+    try { st = await fsp.stat(jf); } catch { return null; }
+
+    const hit = this._cache.get(dir);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.data;
+
+    const data = { dir, title: path.basename(dir), startedAt: st.mtimeMs, segments: [] };
+    const byId = new Map();
+    for (const line of (await fsp.readFile(jf, 'utf8')).split('\n')) {
+      if (!line.trim()) continue;
+      let o;
+      try { o = JSON.parse(line); } catch { continue; }   // 正在写的最后一行可能不完整
+      if (o.kind === 'head') {
+        if (o.title) data.title = o.title;
+        if (o.startedAt) data.startedAt = o.startedAt;
+      } else if (o.kind === 'seg') {
+        /* 同一个 id 可能出现不止一次（先写英文、后补译文的情况），
+           以最后一次为准。 */
+        byId.set(o.id, { id: o.id, t0: o.t0 || 0, t1: o.t1 || 0, en: o.en || '', zh: o.zh || null });
+      }
+    }
+    data.segments = [...byId.values()].sort((a, b) => a.t0 - b.t0);
+    this._cache.set(dir, { mtimeMs: st.mtimeMs, size: st.size, data });
+    return data;
+  }
+
+  /** 在全部课程的转写稿里搜关键词 */
+  async search(query, opts = {}) {
+    const { searchTranscripts } = require('./transcript-search');
+    if (!fs.existsSync(this.root)) return { hits: [], total: 0, truncated: false, tokens: [] };
+    const all = [];
+    for (const e of await fsp.readdir(this.root, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const t = await this.loadTranscript(path.join(this.root, e.name));
+      if (t && t.segments.length) all.push(t);
+    }
+    return searchTranscripts(all, query, opts);
   }
 
   /**

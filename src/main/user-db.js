@@ -22,6 +22,25 @@ function parseWrong(raw) {
   } catch { return []; }
 }
 
+/** 每个词最多记几条语境。再多就是噪音，而且复习卡上只放得下一条 */
+const MAX_CONTEXTS = 5;
+
+/**
+ * 生词本行的 contexts 列是 JSON 字符串，出库前统一解开。
+ * 坏数据不能让整行读不出来，解不开就当没有。
+ */
+function hydrate(row) {
+  if (!row) return row;
+  let contexts = [];
+  if (row.contexts) {
+    try {
+      const v = JSON.parse(row.contexts);
+      if (Array.isArray(v)) contexts = v.filter((c) => c && typeof c.en === 'string');
+    } catch { /* 忽略 */ }
+  }
+  return { ...row, contexts };
+}
+
 /** SM-2：把四档按钮映射成 0-5 的质量分 */
 const GRADE_Q = { again: 0, hard: 3, good: 4, easy: 5 };
 
@@ -55,6 +74,8 @@ class UserDB {
       () => this._migrateV3(),
       // v4：生词本的自有释义（笔记列 v1 就有，但一直没接上）
       () => this._migrateV4(),
+      // v5：生词本记下「在哪句话里遇到的」
+      () => this._migrateV5(),
     ];
 
     const current = this.db.prepare('PRAGMA user_version').get().user_version || 0;
@@ -222,6 +243,20 @@ class UserDB {
     if (!cols.has('noted_at')) this.db.exec('ALTER TABLE wordbook ADD COLUMN noted_at INTEGER');
   }
 
+  /**
+   * v5：语境。在字幕或翻译页里点词收进生词本时，把那句话一起记下来。
+   *
+   * 单独一列，**不塞进 note**：note 是用户自己写的，机器往里追加文字，
+   * 用户删掉一次、下次又被追加回来，越积越乱。语境是程序管的，
+   * 最多留 5 条、按句子去重，用户也能在编辑框里逐条删。
+   *
+   * JSON 数组：[{ en, zh, src, at }]。src 是出处（课名 / 「整段翻译」/ 「视频字幕」）。
+   */
+  _migrateV5() {
+    const cols = new Set(this.db.prepare('PRAGMA table_info(wordbook)').all().map((c) => c.name));
+    if (!cols.has('contexts')) this.db.exec('ALTER TABLE wordbook ADD COLUMN contexts TEXT');
+  }
+
   _prepare() {
     const d = this.db;
     this.q = {
@@ -254,6 +289,7 @@ class UserDB {
       wbNote: d.prepare(
         'UPDATE wordbook SET note = ?, my_def = ?, noted_at = ? WHERE word = ?',
       ),
+      wbContexts: d.prepare('UPDATE wordbook SET contexts = ? WHERE word = ?'),
       wbCountNoted: d.prepare(
         "SELECT COUNT(*) c FROM wordbook WHERE COALESCE(note,'') <> '' OR COALESCE(my_def,'') <> ''",
       ),
@@ -400,9 +436,54 @@ class UserDB {
     return { ok: true, word: w };
   }
 
-  /** 单个生词本条目（含注释）。不在生词本里返回 null */
+  /** 单个生词本条目（含注释与语境）。不在生词本里返回 null */
   entry(word) {
-    return this.q.get.get(String(word || '').trim()) || null;
+    return hydrate(this.q.get.get(String(word || '').trim()) || null);
+  }
+
+  /**
+   * 记一条语境（在哪句话里遇到这个词）。词不在生词本里就先加进来——
+   * 这个入口就是「点了字幕里的词、按下收进生词本」。
+   *
+   * 按英文句子去重，最多留 MAX_CONTEXTS 条，新的在前。
+   * 同一句话重复点收藏不该堆出好几条一模一样的。
+   *
+   * @returns {{ok, word, added:boolean, contexts}}  added=这次是新加进生词本的
+   */
+  addContext(word, { en, zh = null, src = null } = {}) {
+    const w = String(word || '').trim();
+    const sentence = String(en || '').trim();
+    if (!w) return { ok: false, reason: '单词不能为空' };
+
+    let added = false;
+    if (!this.q.has.get(w)) {
+      const now = Date.now();
+      this.q.add.run(w, now, now);
+      added = true;
+    }
+    const row = hydrate(this.q.get.get(w));
+    let list = row.contexts;
+    if (sentence) {
+      const item = {
+        en: sentence.slice(0, 400),
+        zh: zh ? String(zh).trim().slice(0, 400) || null : null,
+        src: src ? String(src).trim().slice(0, 60) || null : null,
+        at: Date.now(),
+      };
+      list = [item, ...list.filter((c) => c.en !== item.en)].slice(0, MAX_CONTEXTS);
+      this.q.wbContexts.run(JSON.stringify(list), w);
+    }
+    return { ok: true, word: w, added, contexts: list };
+  }
+
+  /** 删一条语境（编辑框里的 ×）。按下标删，删完剩空数组就存 NULL */
+  removeContext(word, index) {
+    const w = String(word || '').trim();
+    const row = hydrate(this.q.get.get(w) || null);
+    if (!row) return { ok: false, reason: '不在生词本里' };
+    const list = row.contexts.filter((_, i) => i !== Number(index));
+    this.q.wbContexts.run(list.length ? JSON.stringify(list) : null, w);
+    return { ok: true, contexts: list };
   }
 
   /**
@@ -439,11 +520,11 @@ class UserDB {
   }
 
   list({ limit = 500, offset = 0 } = {}) {
-    return this.q.list.all(limit, offset);
+    return this.q.list.all(limit, offset).map(hydrate);
   }
 
   allWords() {
-    return this.q.allWords.all();
+    return this.q.allWords.all().map(hydrate);
   }
 
   counts() {
@@ -461,7 +542,7 @@ class UserDB {
   /* --------------------------------------------------------- 复习 */
 
   dueQueue(limit = 40) {
-    return this.q.listDue.all(Date.now(), limit);
+    return this.q.listDue.all(Date.now(), limit).map(hydrate);
   }
 
   /**
@@ -789,6 +870,6 @@ class UserDB {
 }
 
 /* 当前 schema 版本 = 迁移条数。测试拿它断言，加迁移时不用改测试 */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
-module.exports = { UserDB, DAY, SCHEMA_VERSION };
+module.exports = { UserDB, DAY, SCHEMA_VERSION, MAX_CONTEXTS };

@@ -37,6 +37,9 @@
     /* 临时稿：还没说完那半句的识别结果。单独存，不进 segments——
        它没有正式 id、不落盘，混进去导出的转写稿会多一堆半句。 */
     partial: null,           // { en, zh }
+    // 历史：跨课程搜索，以及应用内查看某一节
+    search: { query: '', res: null },
+    viewing: null,           // { dir, title, startedAt, segments, focusId }
     byId: new Map(),
     warn: null,
     history: [],
@@ -240,7 +243,9 @@
     div.id = `lec-${seg.id}`;
     div.innerHTML = Lx.lectureRow(seg);
     list.appendChild(div);
-    if (!st.userScrolled) list.scrollTop = list.scrollHeight;
+    /* 查词卡片开着时不滚：你点的那一句会被新字幕顶上去，
+       卡片就指着一片空白了。卡片一关，下一句来时照常滚到底。 */
+    if (!st.userScrolled && !Lx.wordPopoverOpen) list.scrollTop = list.scrollHeight;
     return null;
   }
 
@@ -263,8 +268,8 @@
     }
     // 必须走 lectureRow：行是两列网格，自己拼 DOM 会把英文塞进时间那一窄列
     el.innerHTML = Lx.lectureRow({ en, zh: zh || null, partial: true });
-    // 临时稿总在最底下，除非用户自己往上翻了
-    if (!st.userScrolled) list.scrollTop = list.scrollHeight;
+    // 临时稿总在最底下，除非用户自己往上翻了、或者正开着查词卡片
+    if (!st.userScrolled && !Lx.wordPopoverOpen) list.scrollTop = list.scrollHeight;
   }
 
   function fillTranslation(id, zh, reason) {
@@ -381,6 +386,42 @@
     return r;
   };
 
+  /**
+   * 跑一次搜索。防抖 200ms；慢的请求回来时如果关键词已经变了就丢掉，
+   * 否则结果会闪回上一个词的。
+   */
+  let searchTimer = null;
+  let searchSeq = 0;
+  function runSearch() {
+    clearTimeout(searchTimer);
+    const q = st.search.query.trim();
+    const box = document.getElementById('lecResults');
+    if (!q) {
+      st.search.res = null;
+      repaintKeepingCaret();   // 清空关键词时回到课程列表，但光标别丢
+      return;
+    }
+    // 从「列表」切到「结果」要整页重绘一次，之后只刷结果区
+    if (!box || !box.childElementCount) { st.search.res = null; repaintKeepingCaret(); }
+    searchTimer = setTimeout(async () => {
+      const my = ++searchSeq;
+      const r = await api.lecSearch(q).catch(() => null);
+      if (my !== searchSeq || st.search.query.trim() !== q) return;
+      st.search.res = r || { hits: [], total: 0, tokens: [] };
+      const target = document.getElementById('lecResults');
+      if (target) target.innerHTML = Lx.lectureSearchResults(st);
+    }, 200);
+  }
+
+  /** 整页重绘但把搜索框的焦点和光标还回去 */
+  function repaintKeepingCaret() {
+    const el = document.getElementById('lecSearch');
+    const pos = el ? el.selectionStart : null;
+    paint();
+    const again = document.getElementById('lecSearch');
+    if (again && pos != null) { again.focus(); again.setSelectionRange(pos, pos); }
+  }
+
   /** 事件委托里用得到的动作 */
   Lx.lectureActions = {
     'lec-start': () => start(),
@@ -393,7 +434,46 @@
       paint();
     },
     'lec-title': (el) => { st.title = el.value; },
-    'lec-tab': (el) => { st.view = el.dataset.v; st.userScrolled = false; paint(); },
+    'lec-tab': (el) => {
+      st.view = el.dataset.v;
+      st.userScrolled = false;
+      Lx.wordPopover?.close();
+      paint();
+    },
+
+    /* 搜索：敲字时只重绘结果区，不重绘整页——
+       整页重绘会换掉输入框，光标位置和输入法状态都会丢（中文输入尤其明显）。 */
+    'lec-search': (el) => {
+      st.search.query = el.value;
+      runSearch();
+    },
+
+    'lec-view': async (el) => {
+      const dir = el.dataset.dir;
+      const focusId = el.dataset.focus ? Number(el.dataset.focus) : null;
+      st.view = 'transcript';
+      st.viewing = null;
+      paint();
+      const data = await api.lecRead(dir).catch(() => null);
+      if (!data) { toast('读不到这节课的转写稿'); st.view = 'history'; paint(); return; }
+      st.viewing = { ...data, focusId };
+      paint();
+      // 定位到搜到的那一句，并闪一下让人看见是哪句
+      if (focusId != null) {
+        const row = document.getElementById(`lecv-${focusId}`);
+        row?.scrollIntoView({ block: 'center' });
+      }
+    },
+
+    'lec-back': () => {
+      st.view = 'history';
+      st.viewing = null;
+      Lx.wordPopover?.close();
+      paint();
+      // 回到列表时保留搜索词，光标放回去方便接着改
+      const box = document.getElementById('lecSearch');
+      if (box && st.search.query) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+    },
     'lec-open': (el) => api.lecOpen(el.dataset.dir),
     'lec-recover': async (el) => {
       const r = await api.lecRecover(el.dataset.dir).catch((e) => ({ __error: e.message }));

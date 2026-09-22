@@ -135,7 +135,7 @@
 .lec-texts { min-width: 0; }
 .lec-en {
   font-size: var(--fs-sm);
-  line-height: var(--lh-relaxed);
+  line-height: var(--lh-normal);
   color: var(--ink);
   user-select: text;
 }
@@ -145,7 +145,7 @@
   border-left: 2px solid var(--accent-soft);
   font-family: var(--font-zh);
   font-size: var(--fs-sm);
-  line-height: var(--lh-relaxed);
+  line-height: var(--lh-normal);
   color: var(--ink-soft);
   user-select: text;
 }
@@ -265,7 +265,7 @@
   color: var(--ink);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
-  line-height: var(--lh-relaxed);
+  line-height: var(--lh-normal);
   resize: vertical;
 }
 .set-prompt:focus { outline: none; border-color: var(--accent); }
@@ -277,3 +277,91 @@
   border-left: 2px solid var(--accent);
 }
 .lec-row.is-partial .lec-en { font-style: italic; }
+
+/* ==========================================================================
+   历史：跨课程搜索 + 应用内查看一节课
+   ======================================================================== */
+
+.lec-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+  padding: 0 var(--sp-3);
+  height: 40px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink-ghost);
+}
+.lec-search:focus-within { border-color: var(--accent); }
+.lec-search svg { width: 16px; height: 16px; flex: none; }
+.lec-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+
+.lec-res-sum {
+  margin-bottom: var(--sp-4);
+  font-size: var(--fs-2xs);
+  color: var(--ink-ghost);
+}
+.lec-res-group { margin-bottom: var(--sp-6); }
+.lec-res-title {
+  margin-bottom: var(--sp-2);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+.lec-res-hit {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--d-fast) var(--ease-out);
+}
+.lec-res-hit:hover { background: var(--surface-hover); }
+.lec-res-en {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--ink);
+}
+.lec-res-zh {
+  margin-top: 2px;
+  font-family: var(--font-zh);
+  font-size: var(--fs-xs);
+  color: var(--ink-soft);
+}
+.lec-res-hit mark,
+.lec-res-zh mark {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.lec-viewer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.lec-viewer-tip { font-size: var(--fs-3xs); }
+
+/* 从搜索结果跳进来时，定位到的那一句闪一下，让人看见是哪句 */
+.lec-row.is-focus {
+  background: var(--accent-soft) !important;
+  box-shadow: inset 2px 0 0 var(--accent);
+  animation: lec-focus 1.6s var(--ease-out) both;
+}
+@keyframes lec-focus {
+  0%, 30% { background: var(--accent-soft); }
+  100% { background: var(--accent-soft); }
+}

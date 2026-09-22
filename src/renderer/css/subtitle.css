@@ -157,3 +157,6 @@
    但不能太淡——看电影时它往往是唯一有内容的一行。 */
 .sub-line.is-partial { opacity: 0.72; }
 .sub-line.is-partial .sub-en { font-style: italic; }
+
+/* 字幕里的英文能点了查词（解锁状态下） */
+.sub-en { cursor: pointer; }

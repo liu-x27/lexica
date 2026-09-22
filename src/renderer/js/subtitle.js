@@ -153,6 +153,31 @@
       }
     });
 
+    /* 点字幕里的词查词。
+     *
+     * 悬浮窗只有两行高，放不下查词卡片，所以交给主进程弹那个划词用的悬浮查词窗，
+     * 贴着点击位置出现；这一句字幕一起带过去，收藏时能记下语境。
+     *
+     * 锁定（鼠标穿透）时根本收不到点击，这是对的：看电影时锁着，
+     * 想查词就把鼠标移上来解锁。 */
+    $('#subLines')?.addEventListener('click', (e) => {
+      const WA = window.LexicaWordAt;
+      const en = e.target.closest('.sub-en');
+      if (!WA || !en) return;
+      const r = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+      if (!r || r.startContainer.nodeType !== Node.TEXT_NODE || !en.contains(r.startContainer)) return;
+      const hit = WA.wordAt(r.startContainer.textContent, r.startOffset);
+      if (!hit) return;
+      const zh = en.closest('.sub-line')?.querySelector('.sub-zh:not(.is-pending)')?.textContent?.trim();
+      api.subLookup({
+        word: hit.word,
+        en: en.textContent.trim(),
+        zh: zh && zh !== '…' ? zh : null,
+        x: e.screenX,
+        y: e.screenY,
+      });
+    });
+
     /* 临时稿。空的 en 表示「定稿到了，撤掉临时稿」——
        主进程在推正式字幕时会先发一条空的。 */
     api.onLecPartial(({ en, zh }) => {

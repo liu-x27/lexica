@@ -238,6 +238,30 @@ Lx.TAG_LABEL = {
 };
 Lx.TAG_ORDER = ['zk', 'gk', 'cet4', 'cet6', 'ky', 'ielts', 'toefl', 'gre'];
 
+/**
+ * 「在哪句话里遇到的」列表。词条页、生词本编辑框、复习卡共用一份渲染，
+ * 免得三处各写一份、改一处漏两处（临时稿那次就是这么漂的）。
+ *
+ * @param list      [{ en, zh, src, at }]
+ * @param opts.word 给了就在每条后面放一个删除按钮（只有编辑框需要）
+ * @param opts.max  最多显示几条
+ */
+Lx.contextList = (list, { word = null, max = 5 } = {}) => {
+  const items = (list || []).slice(0, max);
+  if (!items.length) return '';
+  const esc = Lx.esc;
+  const when = (ms) => (ms ? new Date(ms).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '');
+  return `<div class="ctx-list">${items.map((c, i) => `
+    <div class="ctx-item">
+      <div class="ctx-en">${esc(c.en)}</div>
+      ${c.zh ? `<div class="ctx-zh">${esc(c.zh)}</div>` : ''}
+      <div class="ctx-meta">${esc(c.src || '')}${c.src && c.at ? ' · ' : ''}${when(c.at)}
+        ${word != null ? `<button class="ctx-del" data-act="wb-ctx-del" data-word="${esc(word)}"
+                              data-i="${i}" title="删掉这条">×</button>` : ''}
+      </div>
+    </div>`).join('')}</div>`;
+};
+
 Lx.badges = (tags, oxford) => {
   const codes = (tags || []).slice().sort((a, b) => Lx.TAG_ORDER.indexOf(a) - Lx.TAG_ORDER.indexOf(b));
   const out = codes.map((c) => `<span class="badge badge-${c}">${Lx.TAG_LABEL[c] || c}</span>`);

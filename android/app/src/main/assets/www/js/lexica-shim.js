@@ -258,6 +258,13 @@
       emit('wb:changed', user.counts());
       return r;
     },
+    // 语境：安卓用的是同一个 UserDB，真实现
+    wbAddContext: (payload) => {
+      const r = user.addContext(payload?.word, { en: payload?.en, zh: payload?.zh, src: payload?.src });
+      if (r.ok) emit('wb:changed', user.counts());
+      return r;
+    },
+    wbRemoveContext: (word, index) => user.removeContext(word, index),
 
     wbCounts: () => user.counts(),
     wbDue: (limit) => user.dueQueue(limit).map((row) => {
@@ -439,6 +446,9 @@
     lecPartial: () => {},
     lecStop: () => ({ ok: false, reason: '安卓版没有内置语音识别' }),
     lecList: () => [],
+    // 安卓没有课堂记录，自然也没什么可搜、可看的
+    lecSearch: () => ({ hits: [], total: 0, truncated: false, tokens: [] }),
+    lecRead: () => null,
     lecOpen: () => {},
     lecReveal: () => {},
     lecRecover: () => ({ ok: false, reason: '安卓版没有内置语音识别' }),
@@ -451,6 +461,7 @@
     subHide: () => {},
     subToggle: () => false,
     subSetLocked: () => false,
+    subLookup: () => false,
 
     /* ---- 目标、统计、历史 ---- */
     goalProgress: () => user.goalProgress(settings),

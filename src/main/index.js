@@ -390,7 +390,7 @@ function toggleSubtitleWindow(force = null) {
  * @param seen 初始查询词
  * @param near 传了坐标就贴着鼠标弹（划词场景），否则摆在屏幕偏上方居中
  */
-function showQuickWindow(seed, near = null) {
+function showQuickWindow(seed, near = null, extra = null) {
   if (!quickWin) createQuickWindow();
   const cursor = near && Number.isFinite(near.x) ? near : screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(cursor);
@@ -415,7 +415,8 @@ function showQuickWindow(seed, near = null) {
   quickWin.setPosition(Math.round(x), Math.round(y));
   quickWin.show();
   quickWin.focus();
-  quickWin.webContents.send('quick:open', { seed: seed || '' });
+  // 没有语境时显式给 null：上一次从悬浮字幕带进来的语境不能串到这次的划词上
+  quickWin.webContents.send('quick:open', { seed: seed || '', context: extra?.context || null });
 }
 
 function toggleQuickWindow() {
@@ -823,6 +824,20 @@ function registerIpc() {
     return r;
   });
 
+  /**
+   * 带语境收藏：在字幕、翻译页、历史转写稿里点词，按下「收进生词本」走这里。
+   * 语境单独存（wordbook.contexts），不碰用户自己写的笔记。
+   */
+  handle('wb:addContext', (payload) => {
+    const r = user.addContext(payload?.word, {
+      en: payload?.en, zh: payload?.zh, src: payload?.src,
+    });
+    if (r.ok) broadcast('wb:changed', user.counts());
+    return r;
+  });
+
+  handle('wb:removeContext', (payload) => user.removeContext(payload?.word, payload?.index));
+
   /** 写/改注释（笔记 + 我的释义） */
   handle('wb:annotate', (payload) => {
     const r = user.annotate(payload?.word, { note: payload?.note, myDef: payload?.myDef });
@@ -874,7 +889,7 @@ function registerIpc() {
     const sep = isAnki ? '\t' : ',';
     const lines = [];
     if (!isAnki) {
-      lines.push(['单词', '音标', '释义', '我的释义', '我的笔记', '例句', '难度标签', '加入时间', '复习次数']
+      lines.push(['单词', '音标', '释义', '我的释义', '我的笔记', '出处', '例句', '难度标签', '加入时间', '复习次数']
         .map(esc).join(sep));
     }
 
@@ -888,10 +903,14 @@ function registerIpc() {
       const ex = e?.examples?.[0] ? `${e.examples[0].en}${e.examples[0].zh ? (isAnki ? '<br>' : ' ') + e.examples[0].zh : ''}` : '';
       /* Anki 那边列数固定（正面/背面…），自己写的内容拼进背面，
          不能多加两列——多了导入时字段会错位。 */
+      /* 出处：在哪句话里遇到的。只放最近一条——Anki 背面放多了反而干扰，
+         CSV 里给全，一条一行。 */
+      const ctxs = (w.contexts || []).map((c) => `${c.en}${c.src ? `（${c.src}）` : ''}`);
       const anki = [
         w.word,
         e?.phonetic || mine?.phonetic || '',
-        [w.my_def, dictMean, w.note && `【笔记】${w.note}`].filter(Boolean).join('<br>'),
+        [w.my_def, dictMean, w.note && `【笔记】${w.note}`, ctxs[0] && `【出处】${ctxs[0]}`]
+          .filter(Boolean).join('<br>'),
         ex,
         (e?.tags || []).map((t) => t.label).join(' '),
         new Date(w.added_at).toISOString().slice(0, 10),
@@ -903,6 +922,7 @@ function registerIpc() {
         dictMean,
         w.my_def || '',
         w.note || '',
+        ctxs.join(' / '),
         ex,
         (e?.tags || []).map((t) => t.label).join(' '),
         new Date(w.added_at).toISOString().slice(0, 10),
@@ -1886,7 +1906,41 @@ function registerIpc() {
     return !!locked;
   });
 
+  /**
+   * 悬浮字幕里点了一个词。
+   *
+   * 悬浮窗只有两行字幕那么高，塞不下查词卡片，所以借用划词那个悬浮查词窗，
+   * 贴着点击位置弹出来。语境（那一句字幕）一起带过去，
+   * 在查词窗里按收藏时能记下「在哪句话里遇到的」。
+   */
+  handle('sub:lookup', (payload) => {
+    const word = String(payload?.word || '').trim();
+    if (!word) return false;
+    const near = Number.isFinite(payload?.x) && Number.isFinite(payload?.y)
+      ? { x: Math.round(payload.x), y: Math.round(payload.y) } : null;
+    showQuickWindow(word, near, {
+      context: payload?.en ? { en: payload.en, zh: payload.zh || null, src: '视频字幕' } : null,
+    });
+    return true;
+  });
+
   handle('lec:list', () => lectures.list());
+
+  /** 在全部课程的转写稿里搜关键词 */
+  handle('lec:search', (query) => lectures.search(query));
+
+  /**
+   * 读一节课的全部定稿，给应用内的转写稿查看页用。
+   *
+   * dir 从渲染层传来，必须确认它在课堂记录目录里面——
+   * 否则等于开了一个「读任意目录下 journal.jsonl」的口子。
+   */
+  handle('lec:read', (dir) => {
+    const root = path.resolve(lectures.root);
+    const want = path.resolve(String(dir || ''));
+    if (!want.startsWith(root + path.sep)) return null;
+    return lectures.loadTranscript(want);
+  });
   handle('lec:open', (dir) => { if (dir) shell.openPath(dir); });
   handle('lec:reveal', (file) => { if (file) shell.showItemInFolder(file); });
   handle('lec:recover', (dir) => lectures.recover(dir, settings.lectureFormats));
@@ -2585,12 +2639,158 @@ async function runShotSequence(dir) {
         console.error('[shot] ✗ 实时字幕自测没有正常结束', done);
       }
 
+      /* ---- 点字幕里的词查词、收进生词本 ----
+       *
+       * 必须用真实的鼠标事件（sendInputEvent），不能 el.click()：
+       * 取词靠 caretRangeFromPoint(clientX, clientY)，合成的 click 没有坐标，
+       * 那样测等于没测。 */
+      const exec = (js) => mainWin.webContents.executeJavaScript(js).catch((e) => ({ __err: e.message }));
+
+      /** 某个容器里第一处出现 word 的位置（视口坐标），顺带返回整句 */
+      const wordPoint = (scopeSel, word) => exec(`
+        (() => {
+          const scope = document.querySelector(${JSON.stringify(scopeSel)});
+          if (!scope) return null;
+          const w = ${JSON.stringify(word)};
+          for (const el of scope.querySelectorAll('.lec-en')) {
+            const node = [...el.childNodes].find((n) => n.nodeType === 3);
+            if (!node) continue;
+            const text = node.textContent;
+            const i = text.toLowerCase().indexOf(w);
+            if (i < 0) continue;
+            el.scrollIntoView({ block: 'center' });
+            const r = document.createRange();
+            r.setStart(node, i + 1);
+            r.setEnd(node, i + 2);
+            const b = r.getBoundingClientRect();
+            return {
+              x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2),
+              sentence: el.textContent.trim(), src: scope.dataset.ctxSrc || null,
+            };
+          }
+          return null;
+        })()
+      `);
+
+      const clickAt = async (x, y) => {
+        mainWin.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+        mainWin.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+        await wait(1100);   // 查词是一次 IPC + 一次查库
+      };
+
+      const popover = () => exec(`
+        (() => {
+          const b = document.querySelector('.wp.is-open');
+          if (!b) return null;
+          return {
+            word: b.querySelector('.wp-word')?.textContent.trim() || null,
+            via: b.querySelector('.wp-via')?.textContent.trim() || null,
+            senses: b.querySelectorAll('.wp-sense').length,
+            ctx: b.querySelector('.wp-ctx')?.textContent.trim() || null,
+          };
+        })()
+      `);
+
       await view('lecture');
-      await mainWin.webContents.executeJavaScript(
-        "document.querySelector('[data-act=\"lec-tab\"][data-v=\"history\"]')?.click()",
-      ).catch(() => {});
+      await wait(500);
+      const pt = await wordPoint('#lecList', 'replay');
+      if (!pt) {
+        console.error('[shot] ✗ 本节字幕里找不到可点的「replay」');
+      } else {
+        await clickAt(pt.x, pt.y);
+        const wp = await popover();
+        if (wp?.word === 'replay' && wp.senses > 0 && wp.ctx === pt.sentence) {
+          console.log(`[shot] ✓ 点字幕里的词弹出释义：${wp.word}（${wp.senses} 条），语境「${wp.ctx.slice(0, 40)}…」`);
+        } else {
+          console.error('[shot] ✗ 点词卡片不对', { wp, expectSentence: pt.sentence });
+        }
+        await shot('44-word-popover');
+
+        // 收藏：卡片里的按钮不需要坐标，el.click() 就行
+        await exec("document.querySelector('.wp.is-open .wp-save')?.click()");
+        await wait(700);
+        const saved = await exec("window.lexica.wbGet('replay')");
+        const c0 = saved?.row?.contexts?.[0];
+        if (saved?.saved && c0?.en === pt.sentence && c0.src === pt.src) {
+          console.log(`[shot] ✓ 收进生词本并记下语境：「${c0.en.slice(0, 40)}…」出处「${c0.src}」`);
+        } else {
+          console.error('[shot] ✗ 收藏或语境不对', { saved: saved?.saved, contexts: saved?.row?.contexts, expect: pt });
+        }
+        /* 笔记一个字都不能动——语境单独存，用户的笔记是用户的 */
+        if (saved?.row?.note) console.error('[shot] ✗ 收藏时往笔记里写了东西', saved.row.note);
+      }
+
+      /* 词形还原：点 networks 应当查到 network，并且让人看得出来 */
+      const pt2 = await wordPoint('#lecList', 'networks');
+      if (pt2) {
+        await clickAt(pt2.x, pt2.y);
+        const wp = await popover();
+        if (wp?.word === 'network' && wp.via) {
+          console.log(`[shot] ✓ 词形还原：${wp.via}`);
+        } else {
+          console.error('[shot] ✗ 点 networks 没有还原成 network', wp);
+        }
+      }
+      mainWin.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      await wait(300);
+      if (await exec("!!document.querySelector('.wp.is-open')")) console.error('[shot] ✗ Esc 没有关掉查词卡片');
+
+      /* ---- 历史转写稿：搜索 → 打开 → 定位 → 在查看页里接着点词 ---- */
+      await exec("document.querySelector('[data-act=\"lec-tab\"][data-v=\"history\"]')?.click()");
       await wait(700);
       await shot('38-lecture-history');
+
+      await exec(`(() => {
+        const i = document.querySelector('#lecSearch');
+        if (!i) return false;
+        i.value = 'replay buffer';
+        i.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await wait(1000);   // 防抖 200ms + 搜索
+      const found = await exec(`({
+        hits: document.querySelectorAll('#lecResults .lec-res-hit').length,
+        marks: document.querySelectorAll('#lecResults mark').length,
+        sum: document.querySelector('.lec-res-sum')?.textContent.trim() || null,
+        stillHasBox: !!document.querySelector('#lecSearch'),
+      })`);
+      if (found.hits > 0 && found.marks > 0 && found.stillHasBox) {
+        console.log(`[shot] ✓ 转写稿搜索：${found.sum}`);
+      } else {
+        console.error('[shot] ✗ 转写稿搜索不对', found);
+      }
+      await shot('45-transcript-search');
+
+      await exec("document.querySelector('#lecResults .lec-res-hit')?.click()");
+      await wait(1200);
+      const viewer = await exec(`({
+        open: !!document.querySelector('#lecViewer'),
+        rows: document.querySelectorAll('#lecViewer .lec-row').length,
+        focus: document.querySelector('#lecViewer .lec-row.is-focus .lec-en')?.textContent.trim() || null,
+      })`);
+      if (viewer.open && viewer.rows > 0 && /replay/i.test(viewer.focus || '')) {
+        console.log(`[shot] ✓ 打开转写稿并定位到那一句（共 ${viewer.rows} 条）：「${viewer.focus.slice(0, 40)}…」`);
+      } else {
+        console.error('[shot] ✗ 转写稿查看页不对', viewer);
+      }
+      await shot('46-transcript-viewer');
+
+      // 1 和 2 接上：查看页里点词同样能查
+      const pt3 = await wordPoint('#lecViewer .lec-row.is-focus', 'buffer');
+      if (pt3) {
+        await clickAt(pt3.x, pt3.y);
+        const wp = await popover();
+        if (wp?.word === 'buffer') console.log('[shot] ✓ 转写稿查看页里点词也能查');
+        else console.error('[shot] ✗ 查看页里点词没反应', wp);
+        mainWin.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        await wait(300);
+      }
+
+      await exec("document.querySelector('[data-act=\"lec-back\"]')?.click()");
+      await wait(700);
+      const back = await exec("document.querySelector('#lecSearch')?.value || null");
+      if (back === 'replay buffer') console.log('[shot] ✓ 返回后搜索词还在');
+      else console.error('[shot] ✗ 返回后搜索词丢了', back);
     }
   }
 

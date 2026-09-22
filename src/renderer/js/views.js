@@ -57,7 +57,15 @@
       <textarea class="cu-textarea" id="wbDef" rows="2" spellcheck="false"
         placeholder="我的释义（会显示在列表、词条页和复习卡上，留空就用词库的）">${esc(ed.myDef || '')}</textarea>
       <textarea class="cu-textarea" id="wbNote" rows="3" spellcheck="false"
-        placeholder="我的笔记：哪节课遇到的、和哪个词容易混、例句…">${esc(ed.note || '')}</textarea>
+        placeholder="我的笔记：和哪个词容易混、自己的例句…">${esc(ed.note || '')}</textarea>
+      ${
+        /* 语境是在字幕/翻译页里点词收藏时自动记下的，和笔记分开存；
+           这里只能删、不能改——改了就不是原话了。 */
+        ed.contexts?.length
+          ? `<div class="wb-form-hint">在这些句子里遇到过（点字幕里的词收藏时自动记下）：</div>
+             ${Lx.contextList(ed.contexts, { word: ed.word })}`
+          : ''
+      }
       ${
         ed.saved
           ? `<div class="row row-gap-2">
@@ -377,6 +385,7 @@
     const revealed = state.revealed;
 
     const { myDef, note } = queue[state.index];
+    const seenIn = queue[state.index].card?.contexts?.[0] || null;
     /* 自己写的释义排在最前面。词库里没这个词时（自己加的词组），
        它是卡片上唯一的释义——所以「词库中没有」那句话只在两边都空时才出。 */
     const mineLines = [
@@ -394,7 +403,14 @@
     const zh = mineLines + dictLines
       || '<div class="faint">词库中没有这个词的释义，可以在生词本里自己写一条</div>';
 
-    const ex = entry?.examples?.[0]
+    /* 自己在课上/文章里遇到它的那句话，比词库例句更能唤起记忆，优先放。 */
+    const ex = seenIn
+      ? `<div class="fc-ex"><div class="ex">
+           <div class="ex-en">${Lx.highlight(seenIn.en, entry?.word || card.word, [])}</div>
+           ${seenIn.zh ? `<div class="ex-zh">${esc(seenIn.zh)}</div>` : ''}
+           ${seenIn.src ? `<div class="ex-src">—— ${esc(seenIn.src)}</div>` : ''}
+         </div></div>`
+      : entry?.examples?.[0]
       ? `<div class="fc-ex"><div class="ex">
            <div class="ex-en">${Lx.highlight(entry.examples[0].en, entry.word, [])}</div>
            ${entry.examples[0].zh ? `<div class="ex-zh">${esc(entry.examples[0].zh)}</div>` : ''}

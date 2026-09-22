@@ -5,6 +5,10 @@
   const api = window.lexica;
 
   let current = null;
+  /* 当前这个词在不在生词本里，以及从悬浮字幕带进来的语境（那一句字幕）。
+     原先这个窗口根本没有收藏按钮，只能「在主窗口打开」再去点书签。 */
+  let currentSaved = false;
+  let context = null;
   let mtReady = false;
   let settings = { mtAuto: true };
   /** 区分翻译结果是哪一次请求的：用户改输入的速度比模型快 */
@@ -12,6 +16,7 @@
 
   function paintChrome() {
     $('#qIcon').innerHTML = icon('search');
+    $('#qSave').innerHTML = icon('bookmark');
     $('#qExpand').innerHTML = icon('corner');
     $('#qClose').innerHTML = icon('x');
   }
@@ -186,6 +191,8 @@
 
     const e = res.entry;
     current = e.word;
+    currentSaved = !!res.saved;
+    paintSave();
 
     const via = res.via
       ? `<div class="faint" style="font-size:var(--fs-2xs);margin-bottom:var(--sp-2)">
@@ -244,11 +251,23 @@
     body.scrollTop = 0;
   }
 
+  /** 收藏按钮：查到了词才出现；已在生词本里就高亮 */
+  function paintSave() {
+    const b = $('#qSave');
+    if (!b) return;
+    b.classList.toggle('hidden', !current);
+    b.classList.toggle('is-on', !!currentSaved);
+    b.title = currentSaved
+      ? (context ? '已在生词本 · 再记下这句字幕' : '已在生词本')
+      : (context ? '收进生词本，并记下这句字幕' : '收进生词本');
+  }
+
   async function lookup(q) {
     const query = String(q || '').trim();
+    current = null;
+    paintSave();
     if (!query) {
       $('#qBody').innerHTML = blank('输入单词开始查询<br>也可以直接输入中文反查');
-      current = null;
       return;
     }
     const res = await api.lookup(query, { noHistory: true });
@@ -272,6 +291,26 @@
     });
 
     $('#qClose').addEventListener('click', () => api.quickHide());
+
+    /* 收藏：从悬浮字幕点进来的带着那句字幕当语境；
+       划词进来的没有语境，就只收词。已经收过的再点，是「再记一句语境」而不是删除——
+       这里不做删除，删词在生词本里做，免得误点把词弄丢。 */
+    $('#qSave').addEventListener('click', async () => {
+      if (!current) return;
+      if (currentSaved && !context) return Lx.toast('已经在生词本里了');
+      const r = await api.wbAddContext({
+        word: current,
+        en: context?.en || '',
+        zh: context?.zh || null,
+        src: context?.src || null,
+      }).catch((err) => ({ ok: false, reason: err.message }));
+      if (!r?.ok) return Lx.toast(r?.reason || '收藏失败');
+      currentSaved = true;
+      paintSave();
+      Lx.toast(r.added
+        ? `已收进生词本：${current}${context ? '，并记下这句字幕' : ''}`
+        : '记下了这句字幕');
+    });
     $('#qExpand').addEventListener('click', () => api.quickToMain(current || input.value.trim()));
 
     $('#qBody').addEventListener('click', (e) => {
@@ -285,7 +324,9 @@
     });
 
     // 主进程每次唤起时重置内容并聚焦
-    api.onQuickOpen(({ seed }) => {
+    api.onQuickOpen(({ seed, context: ctx }) => {
+      // 每次唤起都重置：上一次从悬浮字幕带来的语境不能串到这次的划词上
+      context = ctx || null;
       input.value = seed || '';
       input.focus();
       input.select();

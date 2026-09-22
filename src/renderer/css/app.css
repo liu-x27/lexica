@@ -1404,3 +1404,56 @@
   color: var(--ink-soft);
   white-space: pre-wrap;
 }
+
+/* 「在哪句话里遇到的」——词条页、生词本编辑框、复习卡共用（Lx.contextList） */
+.ctx-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+}
+.ctx-item {
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 2px solid var(--rule);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--surface);
+}
+.ctx-en {
+  font-size: var(--fs-sm);
+  font-style: italic;
+  line-height: var(--lh-snug);
+  color: var(--ink);
+}
+.ctx-zh {
+  margin-top: 2px;
+  font-family: var(--font-zh);
+  font-size: var(--fs-xs);
+  color: var(--ink-soft);
+}
+.ctx-meta {
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-3xs);
+  color: var(--ink-ghost);
+}
+.ctx-del {
+  margin-left: auto;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--ink-ghost);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.ctx-del:hover { background: var(--surface-hover); color: var(--accent-ink); }
+
+/* 复习卡上那句话的出处 */
+.ex-src {
+  margin-top: 4px;
+  font-size: var(--fs-3xs);
+  color: var(--ink-ghost);
+}

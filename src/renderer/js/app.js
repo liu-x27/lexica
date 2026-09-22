@@ -777,6 +777,7 @@
       phonetic: info?.phonetic || '',
       myDef: info?.row?.my_def || '',
       note: info?.row?.note || '',
+      contexts: info?.row?.contexts || [],
     };
     // 从别的页面点进来的要先切到生词本，否则表单在看不见的视图里
     if (state.view !== 'wordbook') { switchView('wordbook'); await loadWordbook(); }
@@ -1456,6 +1457,16 @@
           case 'wb-save': return saveWbEditor();
           case 'wb-cancel': return closeWbEditor();
 
+          case 'wb-ctx-del': {
+            e.stopPropagation();
+            const r = await api.wbRemoveContext(actEl.dataset.word, Number(actEl.dataset.i));
+            if (!r?.ok) { toast(r?.reason || '删除失败'); return; }
+            if (state.wb.editor) { captureWbDraft(); state.wb.editor.contexts = r.contexts; paintWordbook(); }
+            // 词条页也可能正显示这个词
+            if (state.entry?.word && state.view === 'dict') go(state.entry.word, { push: false });
+            return;
+          }
+
           case 'wb-drop': {
             const w = actEl.dataset.word;
             await api.wbRemove(w);
@@ -1524,6 +1535,11 @@
     document.addEventListener('input', (e) => {
       if (e.target.id === 'lecTitle') {
         Lx.lectureActions?.['lec-title']?.(e.target);
+        return;
+      }
+      // 历史转写稿搜索（安卓上没有 lectureActions，可选链直接跳过）
+      if (e.target.id === 'lecSearch') {
+        Lx.lectureActions?.['lec-search']?.(e.target);
         return;
       }
       if (e.target.id !== 'trInput') return;

@@ -129,16 +129,102 @@
           : '按「开始记录」后，英文与中文会逐句出现在这里，同时写进文件。'}
       </div>`;
     }
-    return `<div class="lec-list scroll" id="lecList">
+    /* data-ctx-src：点里面的词可以查（word-popover.js），值是收藏时记下的出处 */
+    return `<div class="lec-list scroll" id="lecList" data-ctx-src="${esc(st.title || '课堂记录')}">
       ${st.segments.map((s) => `<div class="lec-row" id="lec-${s.id}">${Lx.lectureRow(s)}</div>`).join('')}
     </div>`;
+  }
+
+  /* ------------------------------------------------------ 历史：搜索 */
+
+  const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  /**
+   * 把命中的关键词包上 <mark>。先切分再逐段转义——
+   * 反过来（先转义再替换）会把 &amp; 之类的实体切坏。
+   */
+  function marked(text, tokens) {
+    const s = String(text || '');
+    if (!tokens?.length || !s) return esc(s);
+    const re = new RegExp(`(${tokens.map(escRe).join('|')})`, 'gi');
+    return s.split(re).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join('');
+  }
+
+  const dateOf = (ms) => (ms ? new Date(ms).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '');
+
+  /**
+   * 搜索结果。单独导出：敲字时只重绘这一块，
+   * 整页重绘会换掉输入框，光标和输入法状态都会丢。
+   */
+  Lx.lectureSearchResults = (st) => {
+    const r = st.search?.res;
+    const q = (st.search?.query || '').trim();
+    if (!q) return '';
+    if (!r) return '<div class="lec-empty">搜索中…</div>';
+    if (!r.total) return `<div class="lec-empty">没有找到「${esc(q)}」。换个说法试试，或者只搜其中一个词。</div>`;
+
+    // 按课分组，课的顺序沿用搜索结果（新的在前）
+    const groups = [];
+    const byDir = new Map();
+    for (const h of r.hits) {
+      if (!byDir.has(h.dir)) { const g = { ...h, hits: [] }; byDir.set(h.dir, g); groups.push(g); }
+      byDir.get(h.dir).hits.push(h);
+    }
+
+    return `<div class="lec-res-sum">找到 ${r.total} 处，分布在 ${groups.length} 节课里${
+      r.truncated ? `（只列出前 ${r.hits.length} 处，换个更具体的词能缩小范围）` : ''}</div>
+      ${groups.map((g) => `
+        <div class="lec-res-group">
+          <div class="lec-res-title">${esc(g.title)}<span class="faint">　${dateOf(g.startedAt)}　${g.hits.length} 处</span></div>
+          ${g.hits.map((h) => `
+            <div class="lec-res-hit" data-act="lec-view" data-dir="${esc(h.dir)}" data-focus="${h.id}"
+                 title="打开这节课，定位到这一句">
+              <div class="lec-time">${Lx.lectureClock(h.t0)}</div>
+              <div class="lec-texts">
+                <div class="lec-res-en">${marked(h.en, r.tokens)}</div>
+                ${h.zh ? `<div class="lec-res-zh">${marked(h.zh, r.tokens)}</div>` : ''}
+              </div>
+            </div>`).join('')}
+        </div>`).join('')}`;
+  };
+
+  /* ------------------------------------------------------ 历史：查看一节课 */
+
+  /**
+   * 应用内的转写稿查看页。原先历史里只能「打开文件夹」，
+   * 搜到了也没处可去。这里点词同样能查、能收藏（data-ctx-src 是这节课的课名）。
+   */
+  function renderTranscript(st) {
+    const v = st.viewing;
+    if (!v) return '<div class="lec-empty">读取中…</div>';
+    return `<div class="lec-viewer-head">
+        <button class="btn btn-outline btn-xs" data-act="lec-back">${icon('left')} 返回</button>
+        <div class="lec-hist-title">${esc(v.title)}</div>
+        <span class="faint">${dateOf(v.startedAt)}　${v.segments.length} 条</span>
+        <span class="spacer"></span>
+        <span class="faint lec-viewer-tip">点英文里的词可以查、可以收进生词本</span>
+      </div>
+      <div class="lec-list scroll lec-viewer" id="lecViewer" data-ctx-src="${esc(v.title)}">
+        ${v.segments.length
+          ? v.segments.map((s) => `<div class="lec-row${s.id === v.focusId ? ' is-focus' : ''}"
+                id="lecv-${s.id}">${Lx.lectureRow(s)}</div>`).join('')
+          : '<div class="lec-empty">这节课没有字幕。</div>'}
+      </div>`;
   }
 
   function renderHistory(st) {
     if (!st.history.length) {
       return '<div class="lec-empty">还没有记录。上完一节课，这里会列出全部文件。</div>';
     }
-    return `<div class="lec-history">
+    const q = st.search?.query || '';
+    const box = `<div class="lec-search">
+        ${icon('search')}
+        <input class="lec-search-input" id="lecSearch" type="text" spellcheck="false" autocomplete="off"
+               placeholder="在全部转写稿里搜，如 replay buffer 或 经验回放" value="${esc(q)}">
+      </div>`;
+    // 有关键词时列表换成搜索结果；结果区单独一个容器，敲字时只刷它
+    if (q.trim()) return `${box}<div id="lecResults" class="lec-results">${Lx.lectureSearchResults(st)}</div>`;
+    return `${box}<div id="lecResults" class="lec-results"></div><div class="lec-history">
       ${st.history.map((h) => `
         <div class="lec-hist">
           <div class="lec-hist-main">
@@ -154,6 +240,8 @@
             </div>
           </div>
           <div class="row row-gap-2">
+            ${h.segments ? `<button class="btn btn-outline btn-xs" data-act="lec-view" data-dir="${esc(h.dir)}"
+                 title="在应用里看这节课的转写稿">${icon('book')} 查看</button>` : ''}
             ${h.unfinished || !Object.keys(h.files).length
               ? `<button class="btn btn-outline btn-xs" data-act="lec-recover" data-dir="${esc(h.dir)}"
                    title="从流水账重新生成 md/txt/srt/json">${icon('corner')} 恢复</button>`
@@ -178,7 +266,7 @@
           ${icon('quote')} 视频字幕悬浮窗</button>
         <div class="seg">
           <button class="seg-btn ${st.view === 'live' ? 'is-on' : ''}" data-act="lec-tab" data-v="live">本节</button>
-          <button class="seg-btn ${st.view === 'history' ? 'is-on' : ''}" data-act="lec-tab" data-v="history">历史</button>
+          <button class="seg-btn ${st.view !== 'live' ? 'is-on' : ''}" data-act="lec-tab" data-v="history">历史</button>
         </div>
       </div>
 
@@ -187,7 +275,7 @@
 
       <div id="lecWarn" class="lec-warn ${st.warn ? '' : 'hidden'}">${esc(st.warn || '')}</div>
 
-      ${st.view === 'live' ? renderLive(st) : renderHistory(st)}
+      ${st.view === 'live' ? renderLive(st) : st.view === 'transcript' ? renderTranscript(st) : renderHistory(st)}
 
       ${
         st.view === 'live' && st.segments.length
@@ -206,7 +294,7 @@
         st.view === 'live' && !st.segments.length && !st.running
           ? `<div class="tr-tip">${icon('alert')}
               <div><strong>关于准确度</strong><br>
-              识别用的是 whisper base 模型，翻译用的是本地小模型，两边都会出错：
+              识别和翻译都会出错（识别默认用 whisper small，翻译默认用本地模型，可在设置里开在线翻译）：
               实测 <span class="mono">training</span> 会被听成 <span class="mono">twinning</span>，
               翻译模型会把 <span class="mono">63.8</span> 写成 <span class="mono">638</span>。
               所以这里始终英中对照显示，重要内容（尤其是数字、公式、人名）请以英文原文为准。<br>
