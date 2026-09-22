@@ -578,6 +578,11 @@
                             data-act="lec-mt-model" data-v="${m.key}">${esc(m.label)}</button>`).join('')}</div>`)
               : ''
           }
+          ${stats.asr?.available ? row('滚动字幕', `边说边出<strong>临时字幕</strong>，说完再换成定稿。<br>
+            <span class="faint">实测延迟里翻译只占约 300ms，大头是等说话人把话说完（约 5 秒）——
+            这一项才是治延迟的。临时稿用小模型跑、会有错字，几秒后被定稿替换；
+            它<strong>不写进文件</strong>，转写稿里只有定稿。</span>`,
+            sw('lectureRolling', s.lectureRolling !== false)) : ''}
           ${row('记录格式', `每节课要生成哪几种文件。无论选了哪些，都会额外写一份
             <span class="mono">journal.jsonl</span> 流水账——中途崩了可以从它恢复。`,
             `<div class="seg seg-wrap">${[['md', 'Markdown'], ['txt', '纯文本'], ['srt', '字幕 SRT'], ['json', 'JSON']]

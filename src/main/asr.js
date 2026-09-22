@@ -100,10 +100,14 @@ class AsrEngine extends EventEmitter {
    * @param maxChunkSec 单段音频上限（秒）。必须与 VadChunker 的 maxMs 一致——
    *        它决定 --audio-ctx 取多大，超出会静默截断（见 _spawn 的注释）。
    */
-  constructor(dir, { maxChunkSec = 9 } = {}) {
+  constructor(dir, { maxChunkSec = 9, threads = 0, tag = 'asr' } = {}) {
     super();
     this.dir = dir;
     this.maxChunkSec = maxChunkSec;
+    /* 线程数可以指定：滚动字幕会再起一个服务跑临时稿，
+       那一个必须限死几个核，否则会把准确那一遍挤慢。 */
+    this.threadsOverride = threads;
+    this.tag = tag;
     this.modelDir = path.join(dir, 'models');
     this.proc = null;
     this.port = 0;
@@ -177,7 +181,8 @@ class AsrEngine extends EventEmitter {
     const port = await freePort(PORT_RANGE[0], PORT_RANGE[1]);
     /* 线程数留两个核给翻译进程和界面。识别是 CPU 密集的，
        给满反而会和翻译抢核，两边都变慢。 */
-    const threads = Math.max(4, Math.min(12, os.cpus().length - 2));
+    const threads = this.threadsOverride
+      || Math.max(4, Math.min(12, os.cpus().length - 2));
 
     /* --audio-ctx 是这个功能能不能用的关键参数。
        whisper 的编码器窗口固定 30 秒（1500 帧），短音频也按满窗算，白付一大笔开销。
@@ -252,7 +257,7 @@ class AsrEngine extends EventEmitter {
       if (!this.proc) throw new Error(`服务启动即退出：\n${log.slice(-600)}`);
       try {
         await this._post(probe, 'json');
-        console.log(`[asr] ${m.label} 就绪，端口 ${port}，${threads} 线程，beam ${beam}，`
+        console.log(`[${this.tag}] ${m.label} 就绪，端口 ${port}，${threads} 线程，beam ${beam}，`
                   + `audio-ctx ${audioCtx}（覆盖约 ${(audioCtx / 49).toFixed(0)}s）`
                   + `${prompt ? `，提示词 ${prompt.length} 字` : ''}，`
                   + `${((Date.now() - t0) / 1000).toFixed(1)}s`);

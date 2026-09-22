@@ -34,6 +34,9 @@
     source: 'mic',
     title: '',
     segments: [],            // { id, t0, t1, en, zh, pending }
+    /* 临时稿：还没说完那半句的识别结果。单独存，不进 segments——
+       它没有正式 id、不落盘，混进去导出的转写稿会多一堆半句。 */
+    partial: null,           // { en, zh }
     byId: new Map(),
     warn: null,
     history: [],
@@ -59,6 +62,10 @@
       onLevel: (v) => { st.level = v; },
       // 转移 buffer 所有权，避免每段都复制一遍（一段有几十万个采样点）
       onChunk: (cut) => api.lecFeed(cut.pcm.buffer, cut.startMs),
+      /* 滚动字幕：说到一半就先出临时稿。节奏由音频回调驱动
+         （见 audio-source.js 里的注释——定时器在窗口不可见时会被限流）。 */
+      partialMs: st.status?.rolling ? (st.status.rollingMs || 1500) : 0,
+      onPartial: (snap) => api.lecPartial(snap ? snap.pcm.buffer : null),
     });
   }
 
@@ -237,6 +244,29 @@
     return null;
   }
 
+  /**
+   * 临时稿这一行。
+   *
+   * 固定挂在列表末尾、单独一个 id，不进 st.segments——它没有正式 id、
+   * 不落盘，混进去会被当成正式字幕（导出的转写稿里会多出一堆半句）。
+   */
+  function paintPartial(en, zh) {
+    const list = $('#lecList');
+    if (!list) return;
+    let el = document.getElementById('lec-partial');
+    if (!en) { el?.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'lec-row is-partial';
+      el.id = 'lec-partial';
+      list.appendChild(el);
+    }
+    // 必须走 lectureRow：行是两列网格，自己拼 DOM 会把英文塞进时间那一窄列
+    el.innerHTML = Lx.lectureRow({ en, zh: zh || null, partial: true });
+    // 临时稿总在最底下，除非用户自己往上翻了
+    if (!st.userScrolled) list.scrollTop = list.scrollHeight;
+  }
+
   function fillTranslation(id, zh, reason) {
     const row = st.byId.get(id);
     if (row) { row.zh = zh; row.pending = false; row.reason = reason; }
@@ -260,11 +290,23 @@
   };
 
   Lx.lectureWire = function lectureWire() {
+    /* 临时稿：一句话还没说完时的识别结果。
+       空的 en 表示「定稿到了，撤掉它」。 */
+    api.onLecPartial(({ en, zh }) => {
+      st.partial = en ? { en, zh: zh || null } : null;
+      if (st.view === 'live') paintPartial(en, zh);
+    });
+
     api.onLecSegment((seg) => {
       const row = { ...seg, zh: null, pending: true };
       st.segments.push(row);
       st.byId.set(seg.id, row);
-      if (st.view === 'live') appendSegment(row);
+      if (st.view === 'live') {
+        // 先撤掉临时稿，正式字幕接在它的位置上
+        st.partial = null;
+        paintPartial('');
+        appendSegment(row);
+      }
     });
 
     api.onLecTranslated(({ id, zh, reason }) => fillTranslation(id, zh, reason));

@@ -81,6 +81,8 @@ contextBridge.exposeInMainWorld('lexica', {
   /* 音频块用 send 而不是 invoke：渲染层不该等识别结果，
      结果通过 onLecSegment / onLecTranslated 事件回来。 */
   lecFeed: (pcm, startMs) => ipcRenderer.send('lec:feed', { pcm, startMs }),
+  // 滚动字幕：「说到一半」的音频快照，主进程拿它出临时稿
+  lecPartial: (pcm) => ipcRenderer.send('lec:partial', { pcm }),
   lecStop: () => call('lec:stop'),
   lecList: () => call('lec:list'),
   lecOpen: (dir) => call('lec:open', dir),
@@ -131,5 +133,6 @@ contextBridge.exposeInMainWorld('lexica', {
   onView: (fn) => on('nav:view', fn),
   onTheme: (fn) => on('set:theme', fn),
   onWordbookChanged: (fn) => on('wb:changed', fn),
+  onLecPartial: (fn) => on('lec:partial', fn),
   onQuickOpen: (fn) => on('quick:open', fn),
 });

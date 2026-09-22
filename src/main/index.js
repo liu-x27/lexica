@@ -131,6 +131,12 @@ const DEFAULTS = {
   lectureFormats: ['md', 'txt', 'srt', 'json'],
   // 多长的停顿算一句话说完。教室回声大时可以调大
   lectureSilenceMs: 420,
+  /* 滚动字幕：边说边出临时稿，说完再定稿。
+     实测字幕延迟里翻译只占 300ms，大头是等说话人停顿（约 5 秒），
+     这一项才是治延迟的。默认开。 */
+  lectureRolling: true,
+  lectureRollingModel: 'base',
+  lectureRollingMs: 1500,
 
   /* ---- 电影字幕悬浮窗 ---- */
   subtitleHotkey: 'Ctrl+Alt+S',
@@ -155,6 +161,7 @@ let selection = null;
 let translator = null;
 let asr = null;
 let lectures = null;
+let rollAsr = null;   // 滚动字幕的临时稿服务，与主服务分开
 let mainWin = null;
 let quickWin = null;
 let subWin = null;
@@ -1082,6 +1089,14 @@ function registerIpc() {
       resetTermProbes();
     }
 
+    if (patch.lectureRolling !== undefined) {
+      /* 关掉时顺手把临时稿服务停掉，别让它白占内存和端口。
+         采音层下次 asrStatus() 就不会再发快照了；记录中途改的话
+         快照还会来几条，handlePartial 开头那道判断会挡掉。 */
+      if (!settings.lectureRolling) stopRollAsr();
+      else if (lectures.active) startRollAsr();
+    }
+
     if ((patch.asrModel !== undefined || patch.asrPrompt !== undefined) && asr.status().running) {
       // 正在记录时换模型或改提示词：重启服务，音频队列继续往里送
       const prompt = [lectures.info()?.title ? `Lecture: ${lectures.info().title}.` : '',
@@ -1326,6 +1341,9 @@ function registerIpc() {
     mtModel: translator.model,
     maxChunkSec: LECTURE_MAX_CHUNK_SEC,
     silenceMs: settings.lectureSilenceMs,
+    // 采音层要据此决定是否发「说到一半」的快照
+    rolling: !!settings.lectureRolling && !!rollAsr?.available,
+    rollingMs: settings.lectureRollingMs,
     recording: lectures.active,
     session: lectures.info(),
   }));
@@ -1355,6 +1373,7 @@ function registerIpc() {
     lec.busy = false;
     lec.dropped = 0;
     lec.lagWarned = false;
+    startRollAsr();
 
     /* 记录期间临时切到实时专用的翻译模型，停止时切回来。
        两个模型在工作进程里各自缓存，来回切不会重新加载。 */
@@ -1406,6 +1425,87 @@ function registerIpc() {
     drainLecture();
   });
 
+  /* ---- 滚动字幕（临时稿）----
+   *
+   * 正式字幕要等一句话说完才出（VAD 切段），实测那是 5 秒左右的延迟，
+   * 占了用户感受到的「卡」的绝大部分。这里拿「说到一半」的音频先识别一遍，
+   * 边说边把临时稿推到界面上，说完了再被正式字幕替换掉。
+   *
+   * 三条纪律：
+   * 1. 临时稿**绝不落盘**。文件里只能有定稿，否则转写稿会重复一堆半句。
+   * 2. 正式字幕优先。有正式活儿在跑就跳过这一次临时稿。
+   * 3. 过期的就丢掉，不排队。临时稿的价值在「现在」，攒起来毫无意义。
+   */
+  const roll = { busy: false, seq: 0, lastText: '' };
+
+  async function handlePartial(pcm) {
+    if (!settings.lectureRolling || !lectures.active) return;
+    if (roll.busy) return;                    // 上一份还在跑，这份直接丢
+    if (lec.busy || lec.queue.length) return; // 正式字幕优先
+    if (!rollAsr.available) return;
+
+    roll.busy = true;
+    const myTurn = ++roll.seq;
+    const t0 = Date.now();
+    try {
+      const r = await rollAsr.transcribe(pcm, { baseMs: 0 });
+      // 跑完发现已经有更新的一轮了，这份就作废
+      if (myTurn !== roll.seq || !lectures.active) return;
+
+      const text = r.segments.map((x) => x.text.trim()).filter(Boolean).join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!text || /^[\s.,!?\-—[\]()]*$/.test(text) || /^\[.*\]$/.test(text)) return;
+      if (text === roll.lastText) return;     // 没变化就不必刷界面
+      roll.lastText = text;
+
+      const asrMs = Date.now() - t0;
+      lecSend('lec:partial', { en: text, ms: asrMs });
+      console.log(`[lat] 临时稿 ${(pcm.length / 16000).toFixed(1)}s 识别 ${asrMs}ms`);
+    } catch (e) {
+      const shuttingDown = !lectures.active
+        || /ECONNRESET|socket hang up|ECONNREFUSED/i.test(e.message);
+      if (!shuttingDown) console.error('[roll] 临时稿失败：', e.message);
+    } finally {
+      roll.busy = false;
+    }
+  }
+
+  /**
+   * 起/停临时稿服务。
+   *
+   * 故意**不 await**：它只影响临时稿，起得慢一点无所谓，
+   * 但绝不能因为它启动失败或者慢就把整节课的录制拦住。
+   */
+  function startRollAsr() {
+    if (!settings.lectureRolling || !rollAsr?.available) return;
+    const want = rollAsr.installedModels().some((m) => m.key === settings.lectureRollingModel)
+      ? settings.lectureRollingModel
+      : (rollAsr.installedModels()[0]?.key || 'base');
+    // 临时稿不传提示词：它只求快，提示词会让每次推理都多背一段上下文
+    rollAsr.start(want, { prompt: '' })
+      .catch((e) => console.error('[roll] 启动失败（不影响正式字幕）：', e.message));
+  }
+
+  function stopRollAsr() {
+    roll.seq += 1;
+    roll.lastText = '';
+    try { rollAsr?.stop(); } catch { /* 忽略 */ }
+  }
+
+  ipcMain.on('lec:partial', (_e, payload) => {
+    if (!payload?.pcm) {
+      /* 采音层说「没话了」。要主动撤掉临时稿——这种情况下不会有定稿
+         来覆盖它，不撤的话最后半句（甚至 whisper 在尾音上编出来的整句）
+         会一直挂在屏幕上。 */
+      roll.seq += 1;
+      roll.lastText = '';
+      if (lectures.active) lecSend('lec:partial', { en: '', zh: '' });
+      return;
+    }
+    handlePartial(new Float32Array(payload.pcm)).catch(() => {});
+  });
+
   async function drainLecture() {
     if (lec.busy || !lec.queue.length || !lectures.active) return;
     lec.busy = true;
@@ -1445,6 +1545,10 @@ function registerIpc() {
 
       const id = lectures.addSegment({ t0, t1, en: text });
       lecSend('lec:segment', { id, t0, t1, en: text });
+      // 定稿到了，临时稿该退场；同时作废在途的那一轮
+      roll.seq += 1;
+      roll.lastText = '';
+      lecSend('lec:partial', { en: '', zh: '' });
 
       /* 字幕出现时，这句话已经说完多久了。
          这才是用户感受到的延迟——不是识别耗时。 */
@@ -1518,6 +1622,7 @@ function registerIpc() {
     }
     const out = await lectures.stop();
     asr.stop();
+    stopRollAsr();
     if (lec.prevMtModel) {
       translator.setModel(lec.prevMtModel);
       lec.prevMtModel = null;
@@ -1550,15 +1655,36 @@ function registerIpc() {
     const step = Math.round(16000 * (sliceMs / 1000));
     const paceMs = Math.max(1, Math.round(sliceMs / speed));
     let fed = 0;
+    let partials = 0;
+    let lastPartial = 0;
 
     for (let i = 0; i < audio.length; i += step) {
       const part = audio.subarray(i, Math.min(i + step, audio.length));
-      for (const cut of vad.push(part)) {
+      const cuts = vad.push(part);
+      for (const cut of cuts) {
         /* 走和渲染层完全一样的入队路径，包括积压丢弃逻辑。
            直接调 drainLecture 会绕开那部分，验证就不完整了。 */
         lec.queue.push({ audio: cut.pcm, startMs: cut.startMs, queuedAt: Date.now() });
         fed += 1;
         drainLecture();
+      }
+
+      /* 临时稿也要在自测里走一遍，判断逻辑照抄 audio-source.js：
+         刚切过段就跳过、按倍速换算间隔。不加这一段的话滚动字幕
+         在自动化里完全没被覆盖过，而它恰好是没法用麦克风验证的那部分。 */
+      if (settings.lectureRolling && !cuts.length) {
+        const now = Date.now();
+        const every = Math.max(150, Math.round((settings.lectureRollingMs || 1500) / speed));
+        if (now - lastPartial >= every) {
+          lastPartial = now;
+          const snap = vad.peek();
+          if (snap && snap.sawSpeech) {
+            partials += 1;
+            handlePartial(snap.pcm).catch(() => {});
+          }
+        }
+      } else if (cuts.length) {
+        lastPartial = Date.now();
       }
       await new Promise((r) => setTimeout(r, paceMs));
     }
@@ -1568,7 +1694,7 @@ function registerIpc() {
       fed += 1;
       drainLecture();
     }
-    return { fedSeconds: audio.length / 16000, chunks: fed, speed };
+    return { fedSeconds: audio.length / 16000, chunks: fed, partials, speed };
   });
 
   /* ---- 电影字幕悬浮窗 ---- */
@@ -1599,6 +1725,7 @@ function registerIpc() {
     lec.busy = false;
     lec.dropped = 0;
     lec.lagWarned = false;
+    startRollAsr();
     lec.prevMtModel = translator.model;
     if (settings.lectureMtModel && settings.lectureMtModel !== translator.model) {
       translator.setModel(settings.lectureMtModel);
@@ -1617,6 +1744,7 @@ function registerIpc() {
     if (!lectures.active) return { ok: true };
     const out = await lectures.stop();
     asr.stop();
+    stopRollAsr();
     if (lec.prevMtModel) {
       translator.setModel(lec.prevMtModel);
       lec.prevMtModel = null;
@@ -2202,16 +2330,67 @@ async function runShotSequence(dir) {
     /* 走 Lx.lectureSelfTest：它用真实的 VadChunker 切分、经 lec:feed 送进主进程，
        从这里往后（识别、翻译、落盘）与真实使用完全一致。
        麦克风在自动化里喂不了，但采音之外的每一环都被覆盖了。 */
-    const fed = await mainWin.webContents.executeJavaScript(
+    const feeding = mainWin.webContents.executeJavaScript(
       '(async () => { try { return await window.Lx.lectureSelfTest(); } '
       + 'catch (e) { return { error: e.message }; } })()',
     ).catch((e) => ({ error: e.message }));
+
+    /* 临时稿只在「正在说」的那几秒里存在，喂完就被清掉了。
+       所以必须**在喂的过程中**查 DOM——之前放在喂完之后查，
+       永远是 hasPartial:false，等于这条根本没验到。 */
+    let sawPartial = null;
+    for (let i = 0; i < 24; i++) {
+      await wait(500);
+      const st = await mainWin.webContents.executeJavaScript(`
+        (() => {
+          const p = document.querySelector('#lec-partial');
+          if (!p) return null;
+          const en = p.querySelector('.lec-en');
+          const ref = document.querySelector('.lec-row:not(.is-partial) .lec-en');
+          return {
+            en: en?.textContent?.trim() || '',
+            /* 临时稿的正文列宽必须和定稿一样。
+               第一版临时稿自己拼了 DOM、漏了 .lec-texts 那层包裹，
+               英文掉进 52px 的时间列里，一行只排得下一两个词。 */
+            enWidth: en ? Math.round(en.getBoundingClientRect().width) : 0,
+            refWidth: ref ? Math.round(ref.getBoundingClientRect().width) : 0,
+          };
+        })()
+      `).catch(() => null);
+      if (st?.en) { sawPartial = st; break; }
+    }
+    if (sawPartial) {
+      console.log(`[shot] ✓ 滚动字幕：说话途中出现临时稿「${sawPartial.en.slice(0, 50)}」`);
+      const { enWidth, refWidth } = sawPartial;
+      if (refWidth > 0 && enWidth < refWidth * 0.9) {
+        console.error('[shot] ✗ 临时稿的正文列被挤窄了（DOM 结构和定稿不一致）',
+          { enWidth, refWidth });
+      } else {
+        console.log(`[shot] ✓ 临时稿正文列宽 ${enWidth}px，与定稿 ${refWidth}px 一致`);
+      }
+    } else {
+      console.error('[shot] ✗ 滚动字幕：整个过程没看到临时稿');
+    }
+
+    const fed = await feeding;
     console.log('[shot] 实时字幕自测已喂入', fed);
+    if (fed?.partials > 0) console.log(`[shot] ✓ 临时稿共 ${fed.partials} 次`);
+    else console.error('[shot] ✗ 一次临时稿都没产生', fed);
+
+    /* 说完之后临时稿必须消失。不撤的话最后半句会一直挂在屏幕上——
+       实测 whisper 在尾音上还会编出一整句不存在的话。 */
+    await wait(3000);
+    const lingering = await mainWin.webContents.executeJavaScript(
+      "!!document.querySelector('#lec-partial')",
+    ).catch(() => false);
+    if (lingering) console.error('[shot] ✗ 说完之后临时稿还挂在屏幕上');
+    else console.log('[shot] ✓ 说完之后临时稿已撤掉');
 
     if (!fed?.error) {
       // 自测按 4 倍速喂 66 秒音频（约 17 秒），加上识别追平的时间
       await wait(14000);
       await shot('36-lecture-live');
+
       await wait(14000);
 
       const done = await mainWin.webContents.executeJavaScript(
@@ -2231,6 +2410,28 @@ async function runShotSequence(dir) {
           console.log(`[shot] ✓ 实时字幕落盘 ${done.segments} 条，${wrote.length} 个文件 → ${done.dir}`);
         } else {
           console.error('[shot] ✗ 实时字幕落盘异常', { segments: done.segments, 缺少: hasAll, wrote });
+        }
+
+        /* 临时稿绝不能进文件。
+         *
+         * 这条比「临时稿出现了」更重要：滚动字幕每 1.5 秒出一版半句，
+         * 一旦漏进转写稿，一节课的文件里会混进几百条残句，而且不容易发现——
+         * 文件看起来是满的。判据：定稿数量 == journal 里的行数。 */
+        try {
+          const jl = fs.readFileSync(path.join(done.dir, 'journal.jsonl'), 'utf8')
+            .split(/\r?\n/).filter(Boolean);
+          // journal 每行有 kind 字段：head / seg。只数 seg
+          const segLines = jl.filter((l) => {
+            try { return JSON.parse(l).kind === 'seg'; } catch { return false; }
+          });
+          if (segLines.length === done.segments) {
+            console.log(`[shot] ✓ 临时稿没有混进文件（journal ${segLines.length} 条 = 定稿 ${done.segments} 条）`);
+          } else {
+            console.error('[shot] ✗ 文件里的条数和定稿数不一致，临时稿可能漏进去了',
+              { journal: segLines.length, segments: done.segments });
+          }
+        } catch (e) {
+          console.error('[shot] ✗ 读不到 journal.jsonl：', e.message);
         }
       } else {
         console.error('[shot] ✗ 实时字幕自测没有正常结束', done);
@@ -2394,6 +2595,11 @@ async function runShotSequence(dir) {
       console.error('[shot] ✗ 读不出术语表', terms);
     }
 
+    /* 导入是直接走 IPC 的，绕过了界面，所以页面上的列表还是导入前那份空的。
+       走一遍「离开再回来」让 loadCustom() 重新拉数据——用户从界面导入会自动刷新，
+       这一步只是补上自测绕过 UI 造成的差异。 */
+    await view('dict');
+    await view('custom');
     await mainWin.webContents.executeJavaScript(
       "document.querySelector('[data-act=\"cu-tab\"][data-tab=\"gloss\"]')?.click()",
     ).catch(() => {});
@@ -2786,6 +2992,17 @@ app.whenReady().then(() => {
      只有真的开始上课记录时才值得。这里只构造，start() 由界面触发。
      maxChunkSec 必须与渲染层 VadChunker 的 maxMs 一致——它决定 audio-ctx。 */
   asr = new AsrEngine(path.join(dataDir, 'asr'), { maxChunkSec: LECTURE_MAX_CHUNK_SEC });
+  /* 临时稿单独一个服务。
+   *
+   * 为什么不复用主服务：请求在服务端是串行的，一次临时稿（small+beam5 约 900ms）
+   * 会把正式字幕往后推同样长的时间——正好抵消了滚动字幕想省的那点延迟。
+   * 另起一个用小模型、限死 4 线程（本机 24 核，主服务占 12），互不打扰。
+   * 临时稿会被正式字幕覆盖，所以它准不准无所谓，快才重要。 */
+  rollAsr = new AsrEngine(path.join(dataDir, 'asr'), {
+    maxChunkSec: LECTURE_MAX_CHUNK_SEC,
+    threads: 4,
+    tag: 'roll',
+  });
   lectures = new LectureRecorder(path.join(app.getPath('userData'), 'lectures'));
 
   if (shotDir) {

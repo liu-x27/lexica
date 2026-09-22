@@ -163,3 +163,53 @@ describe('静音切分', () => {
     assert.equal(chunks[0].startMs, 0, 'reset 后时间轴要从零开始');
   });
 });
+
+describe('peek：滚动字幕用的「说到一半」快照', () => {
+  test('返回攒着的音频但不消耗它', () => {
+    const v = new VadChunker({ rate: RATE });
+    feed(v, speech(2000));
+    const p1 = v.peek();
+    assert.ok(p1, '应当有内容');
+    assert.ok(p1.ms > 1500 && p1.ms <= 2100, `时长不对：${p1.ms}`);
+
+    // 再看一次，内容应当还在（没被消耗）
+    const p2 = v.peek();
+    assert.equal(p2.ms, p1.ms, 'peek 不该消耗缓冲');
+
+    // 中途 peek 过，正常切段照样要切出来，且这一段是完整的
+    const cuts = feed(v, concat(speech(1000), silence(700)));
+    assert.equal(cuts.length, 1, `peek 之后应当仍切出一段，实际 ${cuts.length}`);
+    // 3 秒语音都在里面，没有因为 peek 丢掉
+    assert.ok(cuts[0].pcm.length > RATE * 2.5, `段长不对：${cuts[0].pcm.length / RATE}s`);
+  });
+
+  /* 这份 buffer 要经 IPC 传走，结构化克隆会把它 detach。
+     返回 subarray 的话，还没切出去的音频会凭空消失。 */
+  test('返回的是拷贝，不是视图', () => {
+    const v = new VadChunker({ rate: RATE });
+    feed(v, speech(1000));
+    const p = v.peek();
+    p.pcm.fill(0);                       // 模拟下游改动/detach
+    const again = v.peek();
+    assert.ok(again.pcm.some((x) => x !== 0), '内部缓冲被外部改动了');
+  });
+
+  /* whisper 对纯静音会凭空编出句子来，没说话时压根不该去识别 */
+  test('纯静音时 sawSpeech 为假', () => {
+    const v = new VadChunker({ rate: RATE });
+    feed(v, silence(1500));
+    const p = v.peek();
+    if (p) assert.equal(p.sawSpeech, false, '静音不该标成有语音');
+  });
+
+  test('有语音时 sawSpeech 为真', () => {
+    const v = new VadChunker({ rate: RATE });
+    feed(v, speech(1200));
+    assert.equal(v.peek().sawSpeech, true);
+  });
+
+  test('空缓冲返回 null', () => {
+    const v = new VadChunker({ rate: RATE });
+    assert.equal(v.peek(), null);
+  });
+});

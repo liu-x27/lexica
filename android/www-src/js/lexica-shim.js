@@ -435,6 +435,8 @@
       reason: '安卓版没有内置语音识别' }),
     lecStart: () => ({ ok: false, reason: '安卓版没有内置语音识别' }),
     lecFeed: () => {},
+    // 滚动字幕也依赖识别，安卓上没有
+    lecPartial: () => {},
     lecStop: () => ({ ok: false, reason: '安卓版没有内置语音识别' }),
     lecList: () => [],
     lecOpen: () => {},
@@ -498,6 +500,7 @@
     onMtProgress: (fn) => on('mt:progress', fn),
     onSubToggle: (fn) => on('sub:toggle', fn),
     onLecSegment: (fn) => on('lec:segment', fn),
+    onLecPartial: (fn) => on('lec:partial', fn),
     onLecTranslated: (fn) => on('lec:translated', fn),
     onLecWarn: (fn) => on('lec:warn', fn),
     onLecImportProgress: (fn) => on('lec:importProgress', fn),

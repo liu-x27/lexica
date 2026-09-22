@@ -25,6 +25,9 @@
     maxLines: 2,
     cap: null,          // 采音句柄
     status: null,
+    /* 临时稿：一句话还没说完时的识别结果，会被正式字幕整条替换。
+       单独存一份而不是塞进 lines——它没有 id、不落盘，混进去会被当成正式字幕。 */
+    partial: null,      // { en, zh }
   };
 
   /** 只保留最近 N 条，多的丢掉——DOM 一直增长的话几小时后会很卡 */
@@ -41,20 +44,33 @@
   function paint() {
     const box = $('#subLines');
     if (!box) return;
-    if (!st.lines.length) {
+    const esc = window.Lx.esc;
+    /* 临时稿排在最后一行，正式字幕往上挤。
+       它占掉一个行位，所以正式字幕少画一条，总高度不变——
+       否则悬浮窗会在出临时稿的瞬间跳一下。 */
+    const partial = st.partial?.en
+      ? `<div class="sub-line is-partial">
+           <div class="sub-en">${esc(st.partial.en)}</div>
+           <div class="sub-zh${st.partial.zh ? '' : ' is-pending'}">${
+             st.partial.zh ? esc(st.partial.zh) : '…'}</div>
+         </div>`
+      : '';
+
+    if (!st.lines.length && !partial) {
       box.innerHTML = st.running
         ? '<div class="sub-hint">正在听…有人说话时字幕会出现在这里。</div>'
         : '<div class="sub-hint">开启后，这里会显示正在播放内容的英文与中文字幕。</div>';
       return;
     }
     // 只画最后几条，旧的滚出视野
-    const show = st.lines.slice(-st.maxLines);
+    const room = Math.max(1, st.maxLines - (partial ? 1 : 0));
+    const show = st.lines.slice(-room);
     box.innerHTML = show.map((l) => `
       <div class="sub-line" id="sl-${l.id}">
-        <div class="sub-en">${window.Lx.esc(l.en)}</div>
+        <div class="sub-en">${esc(l.en)}</div>
         <div class="sub-zh${l.pending ? ' is-pending' : ''}">${
-          l.pending ? '…' : window.Lx.esc(l.zh || '')}</div>
-      </div>`).join('');
+          l.pending ? '…' : esc(l.zh || '')}</div>
+      </div>`).join('') + partial;
   }
 
   function applyFont() {
@@ -77,6 +93,9 @@
         maxChunkSec: st.status?.maxChunkSec || 9,
         silenceMs: st.status?.silenceMs || 420,
         onChunk: (cut) => api.lecFeed(cut.pcm.buffer, cut.startMs),
+        // 看电影最吃延迟，滚动字幕在这里收益最大
+        partialMs: st.status?.rolling ? (st.status.rollingMs || 1500) : 0,
+        onPartial: (snap) => api.lecPartial(snap ? snap.pcm.buffer : null),
       });
 
       st.running = true;
@@ -134,7 +153,15 @@
       }
     });
 
+    /* 临时稿。空的 en 表示「定稿到了，撤掉临时稿」——
+       主进程在推正式字幕时会先发一条空的。 */
+    api.onLecPartial(({ en, zh }) => {
+      st.partial = en ? { en, zh: zh || null } : null;
+      paint();
+    });
+
     api.onLecSegment((seg) => {
+      st.partial = null;          // 定稿覆盖临时稿
       const row = { ...seg, zh: null, pending: true };
       st.lines.push(row);
       st.byId.set(seg.id, row);

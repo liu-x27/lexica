@@ -176,6 +176,38 @@ class VadChunker {
 
   frameRestLen() { return this.frameRest ? this.frameRest.length : 0; }
 
+  /**
+   * 看一眼当前攒着还没切出去的音频，**不消耗**它。
+   *
+   * 滚动字幕要用：一句话说完才切段，所以字幕总是慢 5 秒；
+   * 拿这份「说到一半」的音频先识别一遍，就能边说边出临时字幕。
+   *
+   * 两点必须注意：
+   * - 返回的是**拷贝**。这份 buffer 要经 IPC 传走，结构化克隆会把它 detach，
+   *   直接给 subarray 会让还没切出去的音频凭空消失（_take 那里踩过同样的坑）。
+   * - `sawSpeech` 一定要看。whisper 对纯静音会凭空编出句子来，
+   *   没有说话时压根不该去识别。
+   *
+   * @returns {{pcm:Float32Array, ms:number, sawSpeech:boolean}|null}
+   */
+  peek() {
+    const n = this.buffered - this.frameRestLen();
+    if (n <= 0) return null;
+    const out = new Float32Array(n);
+    let filled = 0;
+    for (const part of this.buf) {
+      if (filled >= n) break;
+      const take = Math.min(part.length, n - filled);
+      out.set(part.subarray(0, take), filled);
+      filled += take;
+    }
+    return {
+      pcm: out,
+      ms: (n / this.rate) * 1000,
+      sawSpeech: !!this.sawSpeech && this.bufferPeak >= ABSOLUTE_SILENCE,
+    };
+  }
+
   /** 丢掉前 n 个采样点（纯静音），时间轴照常推进，别让后面的字幕错位 */
   _drop(n) {
     let left = Math.min(n, this.buffered);

@@ -269,3 +269,11 @@
   resize: vertical;
 }
 .set-prompt:focus { outline: none; border-color: var(--accent); }
+
+/* 临时稿：还没说完的那半句，会被正式字幕整条替换。
+   左边一道竖线表示「这条还在变」，斜体区分于定稿。 */
+.lec-row.is-partial {
+  background: var(--accent-soft) !important;
+  border-left: 2px solid var(--accent);
+}
+.lec-row.is-partial .lec-en { font-style: italic; }

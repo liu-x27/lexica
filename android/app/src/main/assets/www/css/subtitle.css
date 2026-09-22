@@ -152,3 +152,8 @@
   color: rgba(255, 255, 255, 0.4);
   text-align: center;
 }
+
+/* 临时稿：还没说完的那半句。要看得出「这条会变」，
+   但不能太淡——看电影时它往往是唯一有内容的一行。 */
+.sub-line.is-partial { opacity: 0.72; }
+.sub-line.is-partial .sub-en { font-style: italic; }

@@ -45,10 +45,13 @@
    * @param onLevel    电平回调（0~1），给界面画音量条
    * @param maxChunkSec 单段上限，必须与主进程的 LECTURE_MAX_CHUNK_SEC 一致
    * @param silenceMs  多长静音算一句话说完
+   * @param onPartial  滚动字幕用：每 partialMs 给一次「说到一半」的音频快照
+   * @param partialMs  快照间隔；0 或不传 onPartial 就完全不启用
    * @returns 一个句柄，调用 stop() 收尾（会把尾巴吐出来）
    */
   async function start(source, {
     onChunk, onLevel = null, maxChunkSec = 9, silenceMs = 420,
+    onPartial = null, partialMs = 0,
   } = {}) {
     const stream = await openStream(source);
 
@@ -71,6 +74,8 @@
 
     const vad = new VadChunker({ rate: RATE, maxMs: maxChunkSec * 1000, silenceMs });
     let level = 0;
+    let lastPartial = 0;
+    let sentPartial = false;
 
     node.port.onmessage = (e) => {
       const pcm = new Float32Array(e.data);
@@ -84,7 +89,36 @@
         level = level * 0.7 + peak * 0.3;
         onLevel(level);
       }
-      for (const cut of vad.push(pcm)) onChunk(cut);
+      const cuts = vad.push(pcm);
+      for (const cut of cuts) onChunk(cut);
+
+      /* 滚动字幕的节奏由**音频回调**驱动，绝不能用 setTimeout。
+       *
+       * Chromium 会把不可见/被遮挡窗口的定时器限流到每秒一次甚至更慢——
+       * 而滚动字幕最需要它的场景恰好就是「主窗口被播放器遮住」。
+       * 音频线程不受这个限制，每来一块就顺手判断一次时间到没到。
+       * （同一个坑在自测的音频喂入上踩过一次。） */
+      if (onPartial && partialMs > 0) {
+        // 刚切过段就不必再出临时稿了，正式字幕马上就到
+        if (cuts.length) { lastPartial = Date.now(); sentPartial = false; return; }
+        const now = Date.now();
+        if (now - lastPartial >= partialMs) {
+          lastPartial = now;
+          const snap = vad.peek();
+          // 没说话就别送：whisper 对纯静音会凭空编出句子来
+          if (snap && snap.sawSpeech) {
+            sentPartial = true;
+            onPartial(snap);
+          } else if (sentPartial) {
+            /* 说着说着停了（缓冲被静音清空、或者压根没语音）。
+               这时不会有定稿来覆盖临时稿，不主动撤掉的话，最后那半句
+               会一直挂在屏幕上——实测尾音上 whisper 还会编出一整句
+               不存在的话，就那么留着。 */
+            sentPartial = false;
+            onPartial(null);
+          }
+        }
+      }
     };
 
     const src = ctx.createMediaStreamSource(stream);

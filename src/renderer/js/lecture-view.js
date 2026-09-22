@@ -27,16 +27,27 @@
   };
 
   /** 一条字幕：英文 + 中文 */
+  /**
+   * 字幕行。定稿和滚动字幕的临时稿共用这一个函数。
+   *
+   * 共用是必须的：`.lec-row` 是两列网格（时间 52px + 正文），
+   * 另写一份 DOM 必然漏掉 `.lec-texts` 那层包裹，英文就会掉进时间那一窄列里、
+   * 变成一行一两个词竖着排。第一版临时稿就是这么写坏的。
+   *
+   * @param seg.partial true 表示这是还没说完的临时稿
+   */
   Lx.lectureRow = (seg) => `
-    <div class="lec-time">${Lx.lectureClock(seg.t0)}</div>
+    <div class="lec-time">${seg.partial ? '···' : Lx.lectureClock(seg.t0)}</div>
     <div class="lec-texts">
       <div class="lec-en">${esc(seg.en)}</div>
       ${
-        seg.pending
-          ? '<div class="lec-zh is-pending">翻译中…</div>'
-          : seg.zh
-            ? `<div class="lec-zh">${esc(seg.zh)}</div>`
-            : `<div class="lec-zh is-empty">${esc(seg.reason || '未译出')}</div>`
+        seg.zh
+          ? `<div class="lec-zh">${esc(seg.zh)}</div>`
+          : seg.partial
+            ? '<div class="lec-zh is-pending">正在说…</div>'
+            : seg.pending
+              ? '<div class="lec-zh is-pending">翻译中…</div>'
+              : `<div class="lec-zh is-empty">${esc(seg.reason || '未译出')}</div>`
       }
     </div>`;
 
