@@ -17,6 +17,7 @@ const { Quiz, SCOPE_LABELS, KIND_LABELS, checkSpelling } = require('./quiz');
 const logger = require('./logger');
 const { SelectionWatcher } = require('./selection');
 const { Translator } = require('./translate');
+const { OnlineTranslator } = require('./translate-online');
 const {
   matchTerms, applyGlossary, needProbe, cleanProbe, diffMiddle, frameDiffOk,
   PROBE_FRAME, PROBE_CONTROL,
@@ -100,6 +101,10 @@ const DEFAULTS = {
    * 没装 nllb 时 Translator 会自动回落到已装的那个。
    */
   mtModel: 'nllb',
+  /* 在线翻译：默认关。开启后识别出的英文会发给第三方服务，
+     界面上写明了这点。失败一律自动退回本地模型。 */
+  mtOnline: false,
+  mtOnlineProvider: 'google',
   /**
    * 实时字幕单独用一个更快的模型，默认 opus。
    *
@@ -161,6 +166,7 @@ let selection = null;
 let translator = null;
 let asr = null;
 let lectures = null;
+let online = null;
 let rollAsr = null;   // 滚动字幕的临时稿服务，与主服务分开
 let mainWin = null;
 let quickWin = null;
@@ -670,7 +676,9 @@ function registerIpc() {
     counts: user.counts(),
     settings,
     customCount: user.customCount(),
-    mtAvailable: !!translator?.available,
+    mtAvailable: !!translator?.available || !!online?.available,
+    // 设置页要显示在线翻译的实时统计（退回本地是静默的，得有地方看）
+    mtOnline: online ? online.stats() : null,
     // 设置页要按「装了哪些模型」来渲染选项，没装的不该给出来
     mtModels: translator ? translator.installedModels() : [],
     asr: asr ? asr.status() : { available: false, models: [] },
@@ -1076,6 +1084,19 @@ function registerIpc() {
       else stopClipboardWatch();
     }
 
+    if (patch.mtOnline !== undefined) {
+      settings.mtOnline = online.setEnabled(patch.mtOnline);
+      user.setSetting('mtOnline', settings.mtOnline);
+      /* 换通道等于换模型：术语表探到的错法是上一个通道给的，
+         不作废的话术语表在新通道上一条都命中不了（静默失效）。 */
+      resetTermProbes();
+    }
+    if (patch.mtOnlineProvider !== undefined) {
+      settings.mtOnlineProvider = online.setProvider(patch.mtOnlineProvider);
+      user.setSetting('mtOnlineProvider', settings.mtOnlineProvider);
+      resetTermProbes();
+    }
+
     if (patch.mtModel !== undefined) {
       /* 换模型不用重启工作进程：它按 key 缓存了多个 pipeline。
          回写 settings 是因为 setModel 会拒绝没装的模型，
@@ -1109,6 +1130,52 @@ function registerIpc() {
   });
 
   /* ================================================================== */
+  /*  翻译路由：在线优先，失败退回本地                                    */
+  /* ================================================================== */
+
+  /**
+   * 超时给多少。
+   *
+   * 实时字幕给得很短（1.2 秒）：字幕的价值随时间衰减，宁可退回本地模型
+   * 拿一句差一点的译文，也不能让字幕停在那里等网络。整段翻译不着急，给足。
+   */
+  const ONLINE_TIMEOUT = { live: 1200, batch: 8000, lookup: 2500 };
+
+  /**
+   * 翻一句，**不过术语表**：先试在线，不行退本地。
+   *
+   * 「原始输出」这条通道是术语表探测必须用的——探测要问的就是
+   * 「模型把这个词译成什么」，拿一份已经被术语表修正过的译文去探，
+   * 探到的永远是用户自己写的译名，整个机制就空转了。
+   *
+   * @param kind live | batch | lookup，只决定超时
+   */
+  async function translateRaw(text, kind = 'lookup') {
+    if (online?.available) {
+      const r = await online.translate(text, { timeoutMs: ONLINE_TIMEOUT[kind] });
+      if (r.ok) return { ok: true, text: r.text, ms: r.ms, via: 'online' };
+      /* 失败不报给用户：退回本地是正常的降级路径，上课途中弹一堆
+         「网络不好」只是噪音。统计在设置页里能看到。 */
+    }
+    if (!translator?.available) {
+      return { ok: false, reason: online?.enabled ? '在线翻译失败，且未安装本地模型' : '未安装翻译模型' };
+    }
+    const r = await translator.translate(text);
+    return r?.ok ? { ...r, via: 'local' } : r;
+  }
+
+  /**
+   * 翻一句并过术语表。
+   *
+   * 术语表在两条路上都要生效——在线模型也有自己的偏好
+   * （replay buffer → 重播缓冲区），用户想统一译名就该管得住它。
+   */
+  async function translateOne(text, kind = 'lookup') {
+    const r = await translateRaw(text, kind);
+    return r?.ok ? { ...r, text: fixTerms(text, r.text) } : r;
+  }
+
+  /* ================================================================== */
   /*  术语表：在机器翻译的输出上做一层用户可控的修正                      */
   /* ================================================================== */
 
@@ -1130,7 +1197,7 @@ function registerIpc() {
   let probeCtrlZh = null;
   async function probeControl() {
     if (probeCtrlZh !== null) return probeCtrlZh;
-    const r = await translator.translate(PROBE_FRAME(PROBE_CONTROL));
+    const r = await translateRaw(PROBE_FRAME(PROBE_CONTROL), 'lookup');
     probeCtrlZh = r?.ok ? r.text : '';
     return probeCtrlZh;
   }
@@ -1151,7 +1218,10 @@ function registerIpc() {
    * 探测期间该术语不生效，探完之后的句子才生效。
    */
   async function probeTerms(rows) {
-    if (!translator?.available) return false;
+    /* 对**当前实际在用的通道**探测。开了在线就探在线的错法，
+       否则术语表在在线译文上一条都不会命中。探到的写法是并集，
+       所以来回切通道只会越攒越全，不会互相冲掉。 */
+    if (!translator?.available && !online?.available) return false;
     let changed = false;
     for (const r of rows) {
       if (probedThisRun.has(r.term)) continue;
@@ -1160,11 +1230,11 @@ function registerIpc() {
       const forms = new Set();
       try {
         for (const text of [term, `the ${term}`]) {
-          const out = await translator.translate(text);
+          const out = await translateRaw(text, 'lookup');
           const f = out?.ok ? cleanProbe(out.text) : null;
           if (f) forms.add(f);
         }
-        const [frame, ctrl] = [await translator.translate(PROBE_FRAME(term)), await probeControl()];
+        const [frame, ctrl] = [await translateRaw(PROBE_FRAME(term), 'lookup'), await probeControl()];
         if (frame?.ok && ctrl) {
           const f = cleanProbe(diffMiddle(frame.text, ctrl));
           // 差异段里混进了框架自己的字就不能要，详见 frameDiffOk
@@ -1271,7 +1341,7 @@ function registerIpc() {
 
   /** 手动重探：换了翻译模型之后用得上 */
   handle('gloss:reprobe', async () => {
-    if (!translator?.available) return { ok: false, reason: '未安装翻译模型' };
+    if (!translator?.available && !online?.available) return { ok: false, reason: '未安装翻译模型' };
     resetTermProbes();
     await probeTerms(user.glossary());
     return { ok: true, terms: user.glossary() };
@@ -1279,15 +1349,20 @@ function registerIpc() {
 
   /* ---- 机器翻译兜底 ---- */
   handle('mt:status', () => ({
-    available: !!translator?.available,
-    // 模型质量在术语上不可靠，界面要如实提示，别让人当成词典释义
-    caveat: '机器翻译，专业术语可能不准',
+    available: !!translator?.available || !!online?.available,
+    localAvailable: !!translator?.available,
+    online: online ? online.stats() : null,
+    onlineProviders: OnlineTranslator.providers(),
+    /* 提示语要跟着实际用的通道变：在线服务把数字和术语都修对了，
+       还挂着「专业术语可能不准」会让人不敢用。 */
+    caveat: online?.available
+      ? '在线翻译，质量较好；断网会自动退回本地模型'
+      : '本地机器翻译，专业术语与数字可能不准',
   }));
 
   ipcMain.handle('mt:translate', async (_e, text) => {
     if (!translator) return { ok: false, reason: '翻译模块未初始化' };
-    const r = await translator.translate(text);
-    return r?.ok ? { ...r, text: fixTerms(text, r.text) } : r;
+    return translateOne(text, 'lookup');
   });
 
   /**
@@ -1297,15 +1372,38 @@ function registerIpc() {
   ipcMain.handle('mt:translateLong', async (e, text, token) => {
     if (!translator) return { ok: false, reason: '翻译模块未初始化' };
     const wc = e.sender;
-    const r = await translator.translateLong(text, (p) => {
-      // 期间窗口可能已经关了
-      if (!wc.isDestroyed()) wc.send('mt:progress', { token, ...p });
-    });
+    const push = (p) => { if (!wc.isDestroyed()) wc.send('mt:progress', { token, ...p }); };
+
+    /* 在线通道：一次请求就能翻好几句（实测 4 句 531ms），
+       比本地逐句快一个数量级。切句仍用本地那套规则——缩写、小数点、
+       列表标记那些坑都在里面，不该为在线再写一份。 */
+    if (online?.available) {
+      const { splitSentences } = require('./translate');
+      const parts = splitSentences(String(text || '').trim());
+      if (!parts.length) return { ok: false, reason: '没有可翻译的句子' };
+      push({ done: 0, total: parts.length });
+      const r = await online.translateLines(parts, { timeoutMs: ONLINE_TIMEOUT.batch });
+      if (r.ok) {
+        const sentences = parts.map((src, i) => ({ src, out: fixTerms(src, r.texts[i] || '') }));
+        push({ done: parts.length, total: parts.length });
+        return {
+          ok: true,
+          ms: r.ms,
+          via: 'online',
+          text: sentences.map((x) => x.out).join(''),
+          sentences,
+          truncated: null,
+        };
+      }
+      // 失败就落到下面的本地通道，用户不需要重试
+    }
+
+    const r = await translator.translateLong(text, push);
     if (!r?.ok || !r.sentences) return r;
     /* 按句修而不是对整段修：术语表的门槛是「英文原文里出现过」，
        逐句对照才能保证改的是对应那一句，否则 A 句的术语会去改 B 句的字。 */
     const sentences = r.sentences.map((x) => ({ ...x, out: fixTerms(x.src, x.out) }));
-    return { ...r, sentences, text: sentences.map((x) => x.out).join('') };
+    return { ...r, sentences, via: 'local', text: sentences.map((x) => x.out).join('') };
   });
 
   /* ---- 每日目标 ---- */
@@ -1436,7 +1534,16 @@ function registerIpc() {
    * 2. 正式字幕优先。有正式活儿在跑就跳过这一次临时稿。
    * 3. 过期的就丢掉，不排队。临时稿的价值在「现在」，攒起来毫无意义。
    */
-  const roll = { busy: false, seq: 0, lastText: '' };
+  const roll = { busy: false, seq: 0, lastText: '', lastMtAt: 0 };
+
+  /* 临时稿的译文节流。
+   *
+   * 临时稿每 1.5 秒出一版，而连续两版是「越来越长的前缀」，缓存一次都命不中——
+   * 一节 50 分钟的课就是约 2000 次在线请求。实测这个免费端点会限流
+   * （连发二十来次就吃过一次 HTTP 429），把额度花在临时稿上不划算：
+   * 它几秒后就被定稿覆盖，而定稿的译文才是要留进文件的。
+   * 所以临时稿的译文最多 2.5 秒给一次，定稿不受限制。 */
+  const ROLL_MT_EVERY = 2500;
 
   async function handlePartial(pcm) {
     if (!settings.lectureRolling || !lectures.active) return;
@@ -1462,6 +1569,17 @@ function registerIpc() {
       const asrMs = Date.now() - t0;
       lecSend('lec:partial', { en: text, ms: asrMs });
       console.log(`[lat] 临时稿 ${(pcm.length / 16000).toFixed(1)}s 识别 ${asrMs}ms`);
+
+      /* 临时稿的译文只在**在线翻译可用**时才给。
+         本地模型一句要 300ms 且和识别抢 CPU，每 1.5 秒来一次会把正式
+         字幕拖慢——用延迟换译文，方向正好反了。在线是 40~300ms 且不占本机 CPU。 */
+      if (online?.available && Date.now() - roll.lastMtAt >= ROLL_MT_EVERY) {
+        roll.lastMtAt = Date.now();
+        const tr = await online.translate(text, { timeoutMs: ONLINE_TIMEOUT.live });
+        if (tr.ok && myTurn === roll.seq && lectures.active) {
+          lecSend('lec:partial', { en: text, zh: fixTerms(text, tr.text), ms: asrMs });
+        }
+      }
     } catch (e) {
       const shuttingDown = !lectures.active
         || /ECONNRESET|socket hang up|ECONNREFUSED/i.test(e.message);
@@ -1580,19 +1698,20 @@ function registerIpc() {
   }
 
   async function translateSegment(id, text) {
-    if (!translator.available) {
-      // 没有翻译模型也要放行，否则记录队列会永久卡在这一条
+    if (!translator.available && !online?.available) {
+      // 两条路都没有也要放行，否则记录队列会永久卡在这一条
       lectures.setTranslation(id, null);
       lecSend('lec:translated', { id, zh: null, reason: '未安装翻译模型' });
       return;
     }
     const t0 = Date.now();
-    const r = await translator.translate(text);
+    const r = await translateOne(text, 'live');
     const mtMs = Date.now() - t0;
-    const zh = r && r.ok ? fixTerms(text, r.text) : null;
+    const zh = r && r.ok ? r.text : null;
     lectures.setTranslation(id, zh);
     lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
-    console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词, ${translator.model})`);
+    console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词,`
+      + ` ${r?.via === 'online' ? online.provider : translator.model})`);
   }
 
   handle('lec:stop', async () => {
@@ -1859,9 +1978,9 @@ function registerIpc() {
         if (!text || /^\[.*\]$/.test(text)) continue;
         const id = lectures.addSegment({ t0: seg.t0, t1: seg.t1, en: text });
         lecSend('lec:segment', { id, t0: seg.t0, t1: seg.t1, en: text });
-        if (translator.available) {
-          const tr = await translator.translate(text);
-          const zh = tr && tr.ok ? fixTerms(text, tr.text) : null;
+        if (translator.available || online?.available) {
+          const tr = await translateOne(text, 'batch');
+          const zh = tr && tr.ok ? tr.text : null;
           lectures.setTranslation(id, zh);
           lecSend('lec:translated', { id, zh });
         } else {
@@ -2320,6 +2439,35 @@ async function runShotSequence(dir) {
 
   await view('custom');
   await shot('28-custom-lists');
+
+  /* 在线翻译默认关，而 shot 用的是每次全新的 profile，
+     所以要验证在线那条链路只能靠这个开关。 */
+  if (process.env.LEXICA_SHOT_ONLINE) {
+    settings.mtOnline = online.setEnabled(true);
+    console.log('[shot] 已临时开启在线翻译（LEXICA_SHOT_ONLINE）');
+    const probe = await mainWin.webContents.executeJavaScript(
+      "window.lexica.mtTranslate('Accuracy drops from 71.2 to 63.8 in our ablation study.')",
+    ).catch((e) => ({ error: e.message }));
+    console.log('[shot] 译文：', probe?.text || probe, '｜通道：', probe?.via);
+    /* 必须先确认**走的就是在线通道**。
+     *
+     * 只看译文内容会被降级骗过去：实测端点回过一次 429，请求退回了本地模型，
+     * 而那句话本地恰好也译对了——断言照样打勾，等于什么都没验证。
+     * 判据是 via 字段，不是文本。 */
+    if (probe?.via !== 'online') {
+      console.error('[shot] ✗ 没走在线通道（多半被限流退回了本地）', {
+        via: probe?.via, online: (await mainWin.webContents.executeJavaScript(
+          'window.lexica.mtStatus()').catch(() => null))?.online,
+      });
+    } else if (probe.text.includes('63.8') && !probe.text.includes('638')) {
+      console.log('[shot] ✓ 在线通道生效，且保住了小数点');
+    } else {
+      console.error('[shot] ✗ 在线译文的数字不对', probe.text);
+    }
+    const st = await mainWin.webContents.executeJavaScript('window.lexica.mtStatus()')
+      .catch(() => null);
+    console.log('[shot] 在线状态：', JSON.stringify(st?.online || st));
+  }
 
   /* ---- 实时字幕：用一段真实语音跑完整链路 ---- */
   if (process.env.LEXICA_SHOT_AUDIO) {
@@ -2985,6 +3133,17 @@ app.whenReady().then(() => {
   const dataDir = path.dirname(resolveDictPath());
   // 模型和词库放一起：开发时 data/model，打包后 resources/data/model
   translator = new Translator(path.join(dataDir, 'model'), { model: settings.mtModel });
+  online = new OnlineTranslator({
+    provider: settings.mtOnlineProvider,
+    enabled: !!settings.mtOnline,
+    /* 必须用 net.fetch，不能用全局 fetch。
+     *
+     * 实测同一时刻、同一个 URL：Electron 主进程的全局 fetch 拿到 **429**，
+     * 而 net.fetch 和 node:https 都是 200。我一开始把这个 429 当成
+     * 「这个免费端点会限流」写进了文档，其实是选错了请求通道。
+     * net.fetch 还有个好处：它走 Electron 的会话，代理设置能生效。 */
+    fetchImpl: (...a) => require('electron').net.fetch(...a),
+  });
   // 启动后台预热，第一次划词就不用等模型现加载
   if (translator.available) setTimeout(() => translator.warmup(), 2000);
 

@@ -8,6 +8,7 @@
  *   node scripts/shot.mjs                      → dist/shots
  *   node scripts/shot.mjs docs/screenshots     → 指定目录
  *   node scripts/shot.mjs out --audio a.wav    → 连实时字幕、视频字幕悬浮窗一起截
+ *   node scripts/shot.mjs out --online         → 临时打开在线翻译，验证那条通道
  *
  * --audio 要一段 16k 单声道 wav。没有它就跳过 35~40 那几张：麦克风在自动化里
  * 喂不了，实时字幕那条链路只能靠喂真实语音走通。
@@ -27,21 +28,28 @@ import electron from 'electron';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const USAGE = `用法: npm run shot -- [输出目录] [--audio <16k 单声道 wav>]
+const USAGE = `用法: npm run shot -- [输出目录] [--audio <16k 单声道 wav>] [--online]
 
   npm run shot                                     → dist/shots
-  npm run shot -- docs/screenshots --audio a.wav   → 连实时字幕、悬浮字幕一起截`;
+  npm run shot -- docs/screenshots --audio a.wav   → 连实时字幕、悬浮字幕一起截
+  npm run shot -- dist/shots --online              → 临时开在线翻译验证那条通道
+
+--online 只影响这一次运行，不写进设置。在线翻译平时默认关着，
+而截图模式每次都是全新 profile，不给这个开关就永远验不到那条链路。`;
 
 /* 参数解析得严一点：把没认出来的 --flag 当成输出目录会直接建出一个叫 `--help`
    的目录并跑完整整一轮（八分钟），而不是立刻报错。踩过。 */
 const argv = process.argv.slice(2);
 let audio = null;
+let useOnline = false;
 const rest = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--audio') {
     audio = argv[++i];
     if (!audio) { console.error('--audio 后面要跟文件路径\n\n' + USAGE); process.exit(2); }
+  } else if (a === '--online') {
+    useOnline = true;
   } else if (a === '-h' || a === '--help') {
     console.log(USAGE);
     process.exit(0);
@@ -66,6 +74,7 @@ if (audio && !fs.existsSync(audio)) {
 fs.mkdirSync(outDir, { recursive: true });
 console.log(`截图输出：${outDir}`);
 console.log(audio ? `实时字幕音频：${path.resolve(audio)}` : '未给 --audio，跳过实时字幕相关截图');
+if (useOnline) console.log('在线翻译：本次临时开启（不写进设置）');
 
 const child = spawn(electron, [ROOT], {
   stdio: 'inherit',
@@ -73,6 +82,7 @@ const child = spawn(electron, [ROOT], {
     ...process.env,
     LEXICA_SHOT: outDir,
     ...(audio ? { LEXICA_SHOT_AUDIO: path.resolve(audio) } : {}),
+    ...(useOnline ? { LEXICA_SHOT_ONLINE: '1' } : {}),
   },
 });
 

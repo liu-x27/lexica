@@ -472,6 +472,11 @@
        「分享 / 处理文本」菜单，没有对应设置项，整组直接不渲染。 */
     const isAndroid = stats.platform === 'android';
 
+    /* 在线翻译的状态。stats 里没有时给一份空的，免得每处都写 ?. */
+    const mtOnline = stats.mtOnline || {
+      provider: 'google', calls: 0, errors: 0, cacheHits: 0, avgMs: 0, coolingDown: false, lastError: null,
+    };
+
     return `<div class="page">
       <div class="settings">
         <div class="wb-head"><div class="wb-title">设置</div></div>
@@ -533,6 +538,32 @@
             stats.mtAvailable
               ? sw('mtAuto', s.mtAuto !== false)
               : '<span class="set-desc">未内置</span>')}
+          ${
+            /* 在线翻译。安卓版没有这条路（也没有本地模型），整项不渲染。
+               措辞必须把两件事都说清楚：会外发什么，以及它治不了延迟。 */
+            isAndroid ? '' : row('在线翻译', `本地模型在数字和术语上会<strong>改错内容</strong>
+              （实测 <span class="mono">63.8 → 638</span>、<span class="mono">scalar reward → 一笔奖金</span>），
+              在线服务这几处都是对的。<br>
+              <span class="faint">开启后，要翻译的英文会发送到
+              ${esc((mtOnline.provider === 'google' ? 'Google' : mtOnline.provider))}
+              ——上课时那就是老师讲的内容。断网或超时会自动退回本地模型，字幕不会中断。</span><br>
+              <span class="faint">注意：这<strong>不会</strong>让字幕变快。实测延迟里翻译只占约 300ms，
+              大头是等说话人停顿，那要靠「滚动字幕」解决。</span>`,
+              sw('mtOnline', !!s.mtOnline))
+          }
+          ${
+            /* 开着的时候把实时状态摆出来：退回本地是静默的，
+               不给个地方看统计，用户没法知道自己到底用的是哪条通道。 */
+            !isAndroid && s.mtOnline && mtOnline.calls + mtOnline.errors > 0
+              ? row('在线翻译状态',
+                `已用 ${mtOnline.calls} 次 · 平均 ${mtOnline.avgMs}ms · 缓存命中 ${mtOnline.cacheHits} 次`
+                + (mtOnline.errors
+                  ? ` · <strong>失败 ${mtOnline.errors} 次</strong>（最近：${esc(mtOnline.lastError || '')}）`
+                  : ' · 无失败')
+                + (mtOnline.coolingDown ? '<br><span class="faint">连续失败已暂停一分钟，期间走本地模型。</span>' : ''),
+                '')
+              : ''
+          }
           ${isAndroid ? '' : row('关闭主窗口时最小化到托盘', '关掉窗口后程序继续驻留托盘，热键依然可用。', sw('minimizeToTray', s.minimizeToTray))}
           ${isAndroid ? '' : row('开机自动启动', '以隐藏方式随系统启动，只留托盘图标。', sw('autoLaunch', s.autoLaunch))}
         </div>
