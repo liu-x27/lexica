@@ -1359,6 +1359,45 @@ function registerIpc() {
     probeCtrlZh = null;   // 对照译文是上一个模型给的，换了模型就不能再用
   }
 
+  /**
+   * 起步包：按课程方向预置的术语。返回每个包里有多少条、你已经有了几条，
+   * 界面据此显示「导入」还是「已导入」。
+   */
+  handle('gloss:packs', () => {
+    const { listPacks, packById, COMMON_WORDS } = require('./glossary-packs');
+    const { parseGlossary } = require('./glossary');
+    const have = new Set(user.glossary().map((r) => r.term));
+    return listPacks().map((p) => {
+      const { terms } = parseGlossary(packById(p.id).text);
+      return {
+        ...p,
+        count: terms.length,
+        have: terms.filter((t) => have.has(t.term)).length,
+        sample: terms.slice(0, 5).map((t) => `${t.surface} → ${t.zh}`),
+        // 收了日常常见词的包要醒目地提示适用范围（见 glossary-packs.js 的选词原则）
+        caution: terms.some((t) => COMMON_WORDS.has(t.term)),
+      };
+    });
+  });
+
+  /**
+   * 导入一个起步包。已有的术语一律不动——你自己写的译名是你的课上的说法，
+   * 起步包只是通行译法，不该覆盖你的。
+   */
+  handle('gloss:importPack', (id) => {
+    const { packById } = require('./glossary-packs');
+    const pack = packById(id);
+    if (!pack) return { ok: false, reason: '没有这个起步包' };
+    const r = user.importGlossary(pack.text, { keepExisting: true });
+    if (r.ok && r.count) {
+      glossInvalidate();
+      /* 只探新加进来的（wrong 还是空的那些）。别 resetTermProbes：
+         那是换模型时用的，会把已经探过的全部重探一遍。 */
+      probeTerms(user.glossary().filter((row) => !row.wrong?.length)).catch(() => {});
+    }
+    return { ...r, name: pack.name };
+  });
+
   /** 手动重探：换了翻译模型之后用得上 */
   handle('gloss:reprobe', async () => {
     if (!translator?.available && !online?.available) return { ok: false, reason: '未安装翻译模型' };
@@ -3000,6 +3039,46 @@ async function runShotSequence(dir) {
     } else if (ctrl?.ok) {
       console.log('[shot] ✓ 对照组未被改动');
     }
+
+    /* 起步包。放在术语表这段的最后：导入会在后台探测新词条（每条问三次模型），
+       占着翻译进程，插在前面会把上面那几句翻译挤得超时。 */
+    await view('dict');
+    await view('custom');
+    await mainWin.webContents.executeJavaScript(
+      "document.querySelector('[data-act=\"cu-tab\"][data-tab=\"gloss\"]')?.click()",
+    ).catch(() => {});
+    await wait(700);
+    const packsState = await mainWin.webContents.executeJavaScript(`
+      (() => ({
+        packs: document.querySelectorAll('#view-custom .gl-pack').length,
+        caution: [...document.querySelectorAll('#view-custom .gl-pack-scope.is-caution')]
+          .map((e) => e.closest('.gl-pack').querySelector('.gl-pack-name').textContent.trim().split(/\\s/)[0]),
+      }))()
+    `).catch((e) => ({ error: e.message }));
+    // 只有收了日常常见词的强化学习包该是警示色
+    if (packsState.packs === 5 && packsState.caution?.length === 1 && packsState.caution[0] === '强化学习') {
+      console.log('[shot] ✓ 起步包 5 个，只有强化学习包标了警示色');
+    } else {
+      console.error('[shot] ✗ 起步包列表不对', packsState);
+    }
+
+    const before = (await mainWin.webContents.executeJavaScript('window.lexica.glossAll()')).length;
+    await mainWin.webContents.executeJavaScript(
+      "document.querySelector('[data-act=\"gl-pack\"][data-id=\"sys\"]')?.click()",
+    ).catch(() => {});
+    await wait(1500);
+    const after = await mainWin.webContents.executeJavaScript(`
+      (async () => ({
+        count: (await window.lexica.glossAll()).length,
+        button: document.querySelector('[data-act="gl-pack"][data-id="sys"]')?.textContent.trim() || null,
+      }))()
+    `).catch((e) => ({ error: e.message }));
+    if (after.count - before === 25 && after.button === '已导入') {
+      console.log(`[shot] ✓ 导入「计算机系统与分布式」：术语表 ${before} → ${after.count} 条，按钮变成「已导入」`);
+    } else {
+      console.error('[shot] ✗ 导入起步包不对', { before, after });
+    }
+    await shot('47-glossary-packs');
   }
 
   await setTheme('paper');

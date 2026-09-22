@@ -366,13 +366,15 @@
 
   async function loadCustom() {
     const cu = CU();
-    const [lists, entries, terms] = await Promise.all([
+    const [lists, entries, terms, packs] = await Promise.all([
       api.lists(), api.customAll(300),
       glossaryUsable() ? api.glossAll() : Promise.resolve([]),
+      glossaryUsable() ? api.glossPacks() : Promise.resolve([]),
     ]);
     cu.lists = Array.isArray(lists) ? lists : [];
     cu.entries = Array.isArray(entries) ? entries : [];
     cu.terms = Array.isArray(terms) ? terms : [];
+    cu.packs = Array.isArray(packs) ? packs : [];
     // 补上每个词表能出题的词数
     const scopes = await api.drillScopes();
     if (Array.isArray(scopes)) {
@@ -1292,6 +1294,19 @@
             await loadCustom();
             // 几十条要探几十秒，隔一会儿刷一次让进度可见
             setTimeout(() => { if (CU().tab === 'gloss') refreshTerms(); }, 5000);
+            return;
+          }
+
+          case 'gl-pack': {
+            captureCustomDraft();
+            const r = await api.glossImportPack(actEl.dataset.id);
+            if (!r?.ok) { toast(r?.reason || '导入失败'); return; }
+            toast(r.count
+              ? `已导入「${r.name}」${r.count} 条${r.kept ? `，跳过你已有的 ${r.kept} 条` : ''}；正在问模型它会怎么错译…`
+              : `「${r.name}」里的词条你都已经有了`, 3200);
+            await loadCustom();
+            // 探测在后台跑，每条要问三次模型；过一会儿刷一次让「模型会译成」出现
+            setTimeout(() => { if (CU().tab === 'gloss') refreshTerms(); }, 6000);
             return;
           }
 

@@ -126,6 +126,32 @@
    * @param st.terms 已有术语 [{term, surface, zh, wrong, note, hits}]
    * @param st.gDraft 正在编辑的 {term, zh, note}
    */
+  /**
+   * 起步包：按课程方向预置的常见术语。
+   * 收了日常常见词的包（强化学习包的 policy、agent…）把适用范围标成警示色——
+   * 导入之后，别的课上含这些词的句子也会被改，这件事必须在按下导入之前看到。
+   */
+  function packsBlock(packs) {
+    if (!packs?.length) return '';
+    return `<div class="cu-form gl-packs">
+      <div class="set-label">起步包
+        <span class="faint">按课程方向预置的常见术语，你已经有的词条不会被覆盖</span></div>
+      ${packs.map((p) => {
+        const done = p.have >= p.count;
+        return `<div class="gl-pack">
+          <div class="gl-pack-main">
+            <div class="gl-pack-name">${esc(p.name)}
+              <span class="faint">${p.count} 条${p.have && !done ? ` · 已有 ${p.have}` : ''}</span></div>
+            <div class="gl-pack-scope${p.caution ? ' is-caution' : ''}">${esc(p.scope)}</div>
+            <div class="gl-pack-sample">${p.sample.map(esc).join('　')}　…</div>
+          </div>
+          <button class="btn ${done ? 'btn-outline' : 'btn-accent'}" data-act="gl-pack" data-id="${esc(p.id)}"
+                  ${done ? 'disabled' : ''}>${done ? '已导入' : '导入'}</button>
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
   function glossPanel(st) {
     const d = st.gDraft || {};
     const terms = st.terms || [];
@@ -180,6 +206,8 @@
       </div>
 
       <div class="gl-list">${rows}</div>
+
+      ${packsBlock(st.packs)}
 
       <div class="cu-form">
         <div class="set-label">批量粘贴</div>

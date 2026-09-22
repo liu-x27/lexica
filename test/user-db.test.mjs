@@ -434,3 +434,34 @@ describe('生词本的语境（在哪句话里遇到的）', () => {
     assert.equal(db.list({ limit: 10 }).length, 1);
   });
 });
+
+describe('术语表：导入起步包', () => {
+  /* 起步包是通行译法，你写的是你的课上的说法——绝不能被覆盖 */
+  test('已有的术语不动，只加新的', () => {
+    db = new UserDB(dir);
+    db.putTerm({ term: 'policy', zh: '方针' });
+    const r = db.importGlossary(['policy = 策略', 'agent = 智能体'].join(NL), { keepExisting: true });
+    assert.equal(r.ok, true);
+    assert.equal(r.count, 1, '只该加 agent');
+    assert.equal(r.kept, 1, '要报告跳过了几条已有的');
+    const map = new Map(db.glossary().map((t) => [t.term, t.zh]));
+    assert.equal(map.get('policy'), '方针', '你自己写的译名被起步包覆盖了');
+    assert.equal(map.get('agent'), '智能体');
+  });
+
+  test('全都已经有了时不报错，也不动任何东西', () => {
+    db = new UserDB(dir);
+    db.putTerm({ term: 'policy', zh: '方针' });
+    const r = db.importGlossary('policy = 策略', { keepExisting: true });
+    assert.equal(r.ok, true);
+    assert.equal(r.count, 0);
+    assert.equal(db.glossary()[0].zh, '方针');
+  });
+
+  test('普通导入仍然是覆盖语义（批量粘贴就是用来改译名的）', () => {
+    db = new UserDB(dir);
+    db.putTerm({ term: 'policy', zh: '方针' });
+    db.importGlossary('policy = 策略');
+    assert.equal(db.glossary()[0].zh, '策略');
+  });
+});

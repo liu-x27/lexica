@@ -443,6 +443,8 @@
     glossDelete: () => ({ ok: true }),
     glossImport: () => ({ ok: false, reason: '安卓版未内置翻译模型' }),
     glossReprobe: () => ({ ok: false, reason: '安卓版未内置翻译模型' }),
+    glossPacks: () => [],
+    glossImportPack: () => ({ ok: false, reason: '安卓版不接术语表' }),
 
     /* ---- 机器翻译：只有在线这一条路 ---- */
     mtStatus: () => ({

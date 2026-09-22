@@ -812,13 +812,24 @@ class UserDB {
   }
 
   /** 批量导入一段文本。解析规则在 glossary.js 里 */
-  importGlossary(text, { replace = false } = {}) {
+  /**
+   * @param opts.replace       先清空再导入（「覆盖导入」）
+   * @param opts.keepExisting  已有的术语不动（起步包用）。
+   *        起步包里的 policy = 策略 绝不能覆盖你自己写的 policy = 方针：
+   *        你写的是你的课上的说法，起步包只是通行译法。
+   */
+  importGlossary(text, { replace = false, keepExisting = false } = {}) {
     const { terms, skipped } = parseGlossary(text);
     if (!terms.length) return { ok: false, reason: '没有解析出任何术语', skipped };
 
+    const have = keepExisting && !replace ? new Set(this.glossary().map((r) => r.term)) : null;
+    const fresh = have ? terms.filter((t) => !have.has(t.term)) : terms;
+    const kept = terms.length - fresh.length;
+    if (!fresh.length) return { ok: true, count: 0, skipped, kept, dropped: 0 };
+
     const room = MAX_TERMS - (replace ? 0 : this.glossaryCount());
     if (room <= 0) return { ok: false, reason: `术语表已满（上限 ${MAX_TERMS} 条）` };
-    const use = terms.slice(0, room);
+    const use = fresh.slice(0, room);
 
     this.db.exec('BEGIN');
     try {
@@ -826,7 +837,7 @@ class UserDB {
       const now = Date.now();
       for (const t of use) this.q.gPut.run(t.term, t.surface, t.zh, null, null, now);
       this.db.exec('COMMIT');
-      return { ok: true, count: use.length, skipped, dropped: terms.length - use.length };
+      return { ok: true, count: use.length, skipped, kept, dropped: fresh.length - use.length };
     } catch (e) {
       this.db.exec('ROLLBACK');
       return { ok: false, reason: e.message };

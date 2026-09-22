@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('lexica', {
   glossDelete: (term) => call('gloss:delete', term),
   glossImport: (text, replace) => call('gloss:import', { text, replace }),
   glossReprobe: () => call('gloss:reprobe'),
+  glossPacks: () => call('gloss:packs'),
+  glossImportPack: (id) => call('gloss:importPack', id),
 
   /* 机器翻译兜底 */
   mtStatus: () => call('mt:status'),

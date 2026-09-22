@@ -294,6 +294,56 @@ describe('尾字差一个也要认', () => {
   });
 });
 
+describe('术语表起步包', () => {
+  const { PACKS, COMMON_WORDS } = require(path.join(ROOT, 'src', 'main', 'glossary-packs.js'));
+  const parsed = PACKS.map((p) => ({ ...p, ...parseGlossary(p.text) }));
+
+  test('每个包都能被批量导入的解析器完整读出来，一行都不丢', () => {
+    for (const p of parsed) {
+      assert.ok(p.terms.length >= 15, `${p.id} 只有 ${p.terms.length} 条`);
+      assert.equal(p.skipped, 0, `${p.id} 有 ${p.skipped} 行解析不了`);
+    }
+  });
+
+  test('包内不重复，包与包之间也不重复', () => {
+    const seen = new Map();
+    for (const p of parsed) {
+      for (const t of p.terms) {
+        assert.ok(!seen.has(t.term), `${t.term} 同时出现在 ${seen.get(t.term)} 和 ${p.id}`);
+        seen.set(t.term, p.id);
+      }
+    }
+  });
+
+  /* 选词原则第 2 条：日常常见词会把普通句子也改掉，
+     只能放进说明里写了「只在…时导入」的包。 */
+  test('日常常见词只出现在写明了适用范围的包里', () => {
+    for (const p of parsed) {
+      const common = p.terms.filter((t) => COMMON_WORDS.has(t.term)).map((t) => t.term);
+      if (common.length) {
+        assert.match(p.scope, /只在/, `${p.id} 收了 ${common.join('、')}，但说明里没写适用范围`);
+      }
+    }
+  });
+
+  /* 选词原则第 3 条：跨方向有歧义的词哪个包都不收 */
+  test('跨方向有歧义的词不收', () => {
+    const all = new Set(parsed.flatMap((p) => p.terms.map((t) => t.term)));
+    for (const w of ['kernel', 'inference', 'token']) {
+      assert.ok(!all.has(w), `${w} 在不同方向含义不同，不该进任何起步包`);
+    }
+  });
+
+  test('译名是中文，而且不是把英文原样抄过去', () => {
+    for (const p of parsed) {
+      for (const t of p.terms) {
+        assert.match(t.zh, /[\u4e00-\u9fff]/, `${t.term} 的译名没有中文`);
+        assert.notEqual(t.zh.toLowerCase(), t.term, `${t.term} 译名照抄了英文`);
+      }
+    }
+  });
+});
+
 /* 下面三组是导入起步包后用本地 opus 实测踩出来的，句子和译文都是模型的原样输出。
    原先的实现把它们都「修」坏了，而且坏得比不修还糟。 */
 describe('起步包实测踩出的误改', () => {
