@@ -72,6 +72,13 @@ differs is bridged:
 - `android-sqlite.js` — a `node:sqlite`-shaped shim over a Kotlin `SqlBridge`
 - Kotlin side: `AppBridge`, `SqlBridge`, `TtsBridge`
 
+One bridge detail worth naming, because the error message points nowhere near it:
+`SQLiteDatabase.execSQL()` refuses any statement that returns rows, and several PRAGMAs
+return a row in their *assignment* form — `PRAGMA mmap_size = N` and
+`PRAGMA journal_mode = X` both do. It fails with
+`Queries can be performed using SQLiteDatabase query or rawQuery methods only`, which
+never mentions PRAGMA. Every PRAGMA now goes through `rawQuery(sql, null)`.
+
 ## Running it
 
 Requires Node 22+ (for `node:sqlite`) and Windows for the desktop app.
@@ -104,8 +111,8 @@ test/            188 tests across 37 suites, node:test, no network or data requi
 
 ## Status
 
-The desktop app is what I use daily. The Android build compiles and runs in an emulator;
-**it has not been tested on a physical device.**
+The desktop app is what I use daily. The Android build runs on a physical device — the
+SQLite PRAGMA note above came out of its first launch on one.
 
 The captioning numbers (0.58× → 4.0×, 0.8% WER) come from my own measurements on my own
 hardware and lecture recordings, not from a public benchmark.
