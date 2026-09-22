@@ -18,7 +18,8 @@
  * 报成「与上一张字节完全相同」并以非零码退出）。
  *
  * 常驻托盘的正式 Lexica 不用退。截图模式跳过单实例锁、userData 指向临时目录，
- * 不会碰到真实生词本。
+ * 不会碰到真实生词本。临时目录**每次运行都是新建的**（tmp/lexica-shot-XXXX），
+ * 两轮同时跑也互不干扰；想复用某个目录可以设 LEXICA_SHOT_PROFILE。
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

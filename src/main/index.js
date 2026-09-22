@@ -3115,15 +3115,30 @@ function installDisplayMediaHandler() {
   }
 }
 
+/* 截图模式用独立的用户数据目录，避免碰到真实的生词本和浏览器缓存。
+ *
+ * 两条都是踩出来的：
+ * - **必须在 ready 之前设。** 原先写在 whenReady 里面，user.db 倒是隔离了
+ *   （它是之后才打开的），但 Chromium 的 GPU 进程和磁盘缓存在 ready 之前就定了路径——
+ *   实测 shot 模式的 GPU 进程跑在真实的 AppData\Roaming\Lexica 下，
+ *   还和别的实例抢缓存（日志里的 Unable to move the cache: 拒绝访问）。
+ * - **每次运行一个新目录**，不能是固定路径。原先写死成 tmp/lexica-shot-profile，
+ *   两个会话同时跑 shot 时共用同一个 user.db 和课堂目录；为了干净开始手动 rm -rf，
+ *   又把另一个会话正在跑的那一轮拆掉了——实际发生过一次。
+ *   断言也依赖干净状态（「我写过的」该筛出 1 条，旧数据残留时是 2 条）。
+ * LEXICA_SHOT_PROFILE 可以显式指定目录。 */
+if (process.env.LEXICA_SHOT) {
+  const profile = process.env.LEXICA_SHOT_PROFILE
+    || fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lexica-shot-'));
+  app.setPath('userData', profile);
+}
+
 app.whenReady().then(() => {
   installDisplayMediaHandler();
   app.setAppUserModelId('com.lexica.dictionary');
 
   const shotDir = process.env.LEXICA_SHOT;
-  if (shotDir) {
-    // 截图模式用独立的用户数据目录，避免污染真实生词本
-    app.setPath('userData', path.join(require('node:os').tmpdir(), 'lexica-shot-profile'));
-  }
+  if (shotDir) console.log('[shot] 临时用户数据目录：', app.getPath('userData'));
 
   logger.init(app.getPath('userData'));
 
