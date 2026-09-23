@@ -3595,7 +3595,10 @@ app.on('will-quit', () => {
   stopClipboardWatch();
   selection?.stop();
   translator?.dispose();
+  /* 两个识别服务都是 whisper-server 子进程，Windows 上父进程退出不会带走它们。
+     rollAsr 原先漏在这里：开着滚动字幕退出，它会一直占着端口和几百 MB 内存。 */
   asr?.dispose();
+  rollAsr?.dispose();
   try { if (subWin && !subWin.isDestroyed()) subWin.destroy(); } catch { /* 忽略 */ }
   // 强退时把记录收尾，别让最后几条卡在队列里
   try { lectures?.stop(); } catch { /* 忽略 */ }
