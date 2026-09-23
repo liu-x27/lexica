@@ -30,11 +30,34 @@ const { LectureRecorder } = require('./lecture');
  * 截图模式例外。打包版 Lexica 常驻托盘，这个锁会让 `LEXICA_SHOT=... electron .`
  * 在 requestSingleInstanceLock 这一行就 exit(0) 退出——没有窗口、没有输出、退出码还是 0，
  * 看起来完全像是「这台机器起不了 GUI」，实际只是被自己那个正在跑的实例挡住了。
- * 截图模式本来就用独立的临时 userData（见 app.whenReady 里的 setPath），
+ * 截图模式本来就用独立的临时 userData（见文件末尾 LEXICA_SHOT_PROFILE 那段），
  * 和正式实例并存不会碰到真实生词本，所以直接跳过这个锁。 */
 if (!process.env.LEXICA_SHOT && !app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
+}
+
+/* 截图模式要保证抓到的是这一步真实的画面，做三件事。
+ *
+ * 1. 窗口不做后台节流。窗口被盖住或最小化时 Chromium 把页面当成 hidden，停掉 rAF
+ *    和出帧，capturePage 照样立刻返回，给的却是之前的画面，而且往往只落后一步，
+ *    和上一张比字节抓不出来。探针实测（每种 12 步 × 3 轮）：被置顶窗口盖住时错
+ *    2~5 张，最小化时错 7~8 张；关掉节流后全部 0 错。只关原生遮挡计算
+ *    （CalculateNativeWinOcclusion）治得了盖住、治不了最小化。
+ * 2. 最小化了立刻还原。光关节流在探针里够了，在真实应用里不够：外部脚本每 4 秒
+ *    把窗口最小化一次、跑完整轮，rAF 还是停了 16 次，复习卡片还拍成了空白——
+ *    入场动画停在 opacity:0 的第一帧，rAF 检查照样放行。
+ * 3. 强制「减弱动效」。应用本来就支持 prefers-reduced-motion（tokens.css 把时长
+ *    归零），入场动画一出来就是终态，截图不再取决于合成器有没有把动画推完。
+ *
+ * 正式运行一样都不做：常驻托盘时该节流就节流，动效照常。 */
+const SHOT_MODE = !!process.env.LEXICA_SHOT;
+const BG_THROTTLE = !SHOT_MODE;
+if (SHOT_MODE) {
+  app.commandLine.appendSwitch('force-prefers-reduced-motion');
+  app.on('browser-window-created', (_e, win) => {
+    win.on('minimize', () => setImmediate(() => { if (!win.isDestroyed()) win.restore(); }));
+  });
 }
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -244,6 +267,7 @@ function createMainWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      backgroundThrottling: BG_THROTTLE,
     },
   });
 
@@ -289,6 +313,7 @@ function createQuickWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      backgroundThrottling: BG_THROTTLE,
     },
   });
 
@@ -340,6 +365,7 @@ function createSubtitleWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      backgroundThrottling: BG_THROTTLE,
     },
   });
 
@@ -2259,41 +2285,60 @@ async function runShotSequence(dir) {
 
   /* 上一张截图的字节，用来发现旧帧（见下面 shot 的注释） */
   const lastPng = new Map();
-  let stalePngs = 0;
+  let badShots = 0;
 
   /**
-   * capturePage 在窗口被遮挡或未重绘时可能一直不 resolve，
-   * 所以加超时兜底，单张失败也不影响后面的步骤。
+   * capturePage 返回的是「最后呈现的那一帧」，不会替你等这一步画完。
+   * 所以抓之前先确认页面在出帧：invalidate() 泵一帧，再等两个 rAF。
+   * rAF 跑完，说明主线程已经把这一步画进了一帧（合成器上的动画不归它管，
+   * 那一类靠强制减弱动效兜住，见 BG_THROTTLE）。跑不完，说明 Chromium 把窗口
+   * 当成了 hidden，这时抓到的是旧画面，而且往往只落后一步（以前 18 往后每张都
+   * 慢一步：19 拍成了模式页、20 拍成了题面），跟上一张比字节是抓不出来的。
+   * 所以 rAF 不跑就判这一步失败、不存图，而不是超时之后照抓不误。
    *
-   * 抓之前必须先逼出一帧。capturePage 返回的是「最后呈现的那一帧」，
-   * 窗口被别的窗口盖住时合成器干脆不产新帧——实测 33/41/17 三张字节完全相同，
-   * 而 18 往后每一张都比实际状态慢一步：19 拍成了模式页、20 拍成了题面。
-   * invalidate() 手动泵一帧，再等两个 rAF 确认它真画完了；
-   * 窗口被遮挡时 rAF 可能压根不跑，所以带超时兜底。
+   * 截图模式已经关了后台节流、最小化会自动还原（见 BG_THROTTLE），正常不会走到
+   * 失败分支；真走到了就先救一次（还原、提到最前），还不行再报错，退出码非零。
    */
+  const painted = (win) => {
+    try { win.webContents.invalidate(); } catch { /* 旧版本没有这个方法 */ }
+    return Promise.race([
+      win.webContents.executeJavaScript(
+        'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))',
+      ).catch(() => false),
+      wait(1500).then(() => false),
+    ]);
+  };
+
   const shot = async (name, win = mainWin) => {
+    const file = path.join(dir, `${name}.png`);
     try {
       win.focus();
-      try { win.webContents.invalidate(); } catch { /* 旧版本没有这个方法 */ }
-      await Promise.race([
-        win.webContents.executeJavaScript(
-          'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))',
-        ).catch(() => null),
-        wait(1500),
-      ]);
+      if (!(await painted(win))) {
+        if (win.isMinimized()) win.restore();
+        win.moveTop();
+        await wait(400);
+        if (!(await painted(win))) {
+          badShots++;
+          fs.rmSync(file, { force: true });   // 别让上一轮留下的同名图冒充这一轮的
+          console.error('[shot] ✗', name, '窗口没在出帧（rAF 不跑），抓到的会是旧画面，这张不存');
+          return;
+        }
+        console.log('[shot]', name, '窗口一度不出帧，还原并提到最前后恢复了');
+      }
 
+      /* capturePage 偶尔一直不 resolve，加超时兜底，单张失败不影响后面的步骤 */
       const img = await Promise.race([
         win.webContents.capturePage(),
         wait(6000).then(() => null),
       ]);
       if (!img) { console.log('[shot]', name, '超时跳过'); return; }
       const png = img.toPNG();
-      fs.writeFileSync(path.join(dir, `${name}.png`), png);
+      fs.writeFileSync(file, png);
 
-      /* 主窗口每一步都换了视图或主题，连着两张一模一样就只能是旧帧。
+      /* 第二道检查。主窗口每一步都换了视图或主题，连着两张一模一样只能是旧帧。
          悬浮窗不比（40-subtitle-locked 和上一张本来就该长得一样）。 */
       if (win === mainWin && lastPng.get(win.id)?.equals(png)) {
-        stalePngs++;
+        badShots++;
         console.error('[shot] ✗', name, '与上一张字节完全相同，抓到的是旧帧');
       } else {
         console.log('[shot]', name, 'ok');
@@ -3346,10 +3391,10 @@ async function runShotSequence(dir) {
   await view('wordbook');
   await shot('24-wordbook-virtual');
 
-  if (stalePngs) console.error(`[shot] ✗ 有 ${stalePngs} 张截图是旧帧，看图不作数`);
+  if (badShots) console.error(`[shot] ✗ 有 ${badShots} 张截图不可信（旧帧或窗口没在出帧），看图不作数`);
   console.log('[shot] 完成，输出目录：', dir);
   quitting = true;
-  app.exit(stalePngs ? 1 : 0);
+  app.exit(badShots ? 1 : 0);
 }
 
 function broadcast(channel, payload) {

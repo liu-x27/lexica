@@ -13,9 +13,10 @@
  * --audio 要一段 16k 单声道 wav。没有它就跳过 35~40 那几张：麦克风在自动化里
  * 喂不了，实时字幕那条链路只能靠喂真实语音走通。
  *
- * 跑的时候别动鼠标键盘：capturePage 拿的是「最后呈现的那一帧」，主窗口被别的
- * 窗口盖住时合成器干脆不产新帧，抓到的就是旧帧（runShotSequence 会把这种情况
- * 报成「与上一张字节完全相同」并以非零码退出）。
+ * 跑的时候可以照常用电脑：截图模式关了后台节流，窗口被盖住也照样出帧；最小化会被
+ * 立刻还原。只是别在 Lexica 窗口里点东西、打字，会打乱脚本的步骤。万一某一步窗口
+ * 没在出帧，runShotSequence 不存那张图、以非零码退出，不会拿旧画面冒充。
+ * 截图模式还强制开了「减弱动效」，入场动画直接是终态——截出来的就是静止后的样子。
  *
  * 常驻托盘的正式 Lexica 不用退。截图模式跳过单实例锁、userData 指向临时目录，
  * 不会碰到真实生词本。临时目录**每次运行都是新建的**（tmp/lexica-shot-XXXX），
@@ -90,7 +91,7 @@ const child = spawn(electron, [ROOT], {
 child.on('exit', (code) => {
   const n = fs.readdirSync(outDir).filter((f) => f.endsWith('.png')).length;
   console.log(`\n${n} 张，退出码 ${code}`);
-  // runShotSequence 抓到旧帧时会以 1 退出：截图存在但内容是上一步的，不能直接用
-  if (code) console.error('非零退出：有截图抓到了旧帧或流程中途出错，别直接拿去用');
+  // runShotSequence 发现有截图不可信（旧帧或窗口没在出帧）时以 1 退出
+  if (code) console.error('非零退出：有截图不可信或流程中途出错，别直接拿去用');
   process.exit(code ?? 1);
 });
