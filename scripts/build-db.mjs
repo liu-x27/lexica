@@ -18,6 +18,10 @@ import readline from 'node:readline';
 import zlib from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+/* 建库写进索引的键，查询时 dict-db 要按同一套规则再算一遍，所以两边共用一份 */
+const { spaceCJK, soundex, zhSegments } = createRequire(import.meta.url)('../src/main/text-keys.js');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RAW = path.join(ROOT, 'data', 'raw');
@@ -46,41 +50,6 @@ const num = (n) => n.toLocaleString('en-US');
 /* ========================================================================== */
 /*  文本工具                                                                   */
 /* ========================================================================== */
-
-/** 汉字之间插空格，让 unicode61 分词器把中文切成单字，从而支持任意长度中文反查 */
-function spaceCJK(s) {
-  if (!s) return '';
-  let out = '';
-  let prevCJK = false;
-  for (const ch of s) {
-    const cjk = ch >= '㐀' && ch <= '鿿';
-    if (cjk) {
-      out += (out && !out.endsWith(' ') ? ' ' : '') + ch;
-    } else {
-      if (prevCJK && ch !== ' ') out += ' ';
-      out += ch;
-    }
-    prevCJK = cjk;
-  }
-  return out;
-}
-
-/** 标准美式 Soundex，用作拼写纠错的音近候选键 */
-function soundex(word) {
-  const s = word.toUpperCase().replace(/[^A-Z]/g, '');
-  if (!s) return '';
-  const code = { B: 1, F: 1, P: 1, V: 1, C: 2, G: 2, J: 2, K: 2, Q: 2, S: 2, X: 2, Z: 2,
-                 D: 3, T: 3, L: 4, M: 5, N: 5, R: 6 };
-  let out = s[0];
-  let last = code[s[0]] || 0;
-  for (let i = 1; i < s.length && out.length < 4; i++) {
-    const c = s[i];
-    const d = code[c] || 0;
-    if (d && d !== last) out += d;
-    if (c !== 'H' && c !== 'W') last = d;
-  }
-  return out.padEnd(4, '0');
-}
 
 const STOP = new Set(
   ('a an the and or but if then than that this these those of in on at to for with without from by as is are was were be been being am do does did doing have has had having will would can could shall should may might must not no nor so such very too also just only own same s t don now i you he she it we they me him her them my your his its our their what which who whom whose when where why how all any both each few more most other some there here about into over under again further once out up down off above below between through during before after while because until against among'
@@ -1385,23 +1354,6 @@ function buildWordTags(db) {
   for (const r of rows) step(`  ${r.tag.padEnd(9)} ${num(r.n).padStart(6)} 词，可出题 ${num(r.q)}`);
 }
 
-/* 释义行开头的词性缩写与域标记，切片段前要剥掉。
-   必须与 src/main/dict-db.js 里的 ZH_NOISE 保持一致。 */
-const ZH_NOISE = /^(?:[a-z]{1,5}\.\s*)+|^\[[^\]]{1,6}\]\s*|^(?:un|abbr|pl)\.\s*/i;
-
-/** 把一条中文释义切成独立义项片段 */
-function zhSegments(translation) {
-  const out = [];
-  for (const line of String(translation || '').split(/\r?\n/)) {
-    for (const raw of line.split(/[；;，,、]/)) {
-      let s = raw.trim().replace(ZH_NOISE, '').replace(ZH_NOISE, '').trim();
-      s = s.replace(/^\[[^\]]{1,6}\]\s*/, '').trim();
-      if (s) out.push(s);
-    }
-  }
-  return out;
-}
-
 function buildZhSegments(db) {
   const ins = db.prepare('INSERT INTO zh_seg (seg, word_id, rank, weak) VALUES (?, ?, ?, ?)');
   const sel = db.prepare(
@@ -1420,7 +1372,7 @@ function buildZhSegments(db) {
       last = r.id;
       scanned++;
       const seen = new Set();
-      for (const s of zhSegments(r.translation)) {
+      for (const { text: s } of zhSegments(r.translation)) {
         // 只留含中文、不超过 10 字的片段：更长的片段做精确匹配没有意义
         if (s.length > 10 || !/[一-鿿]/.test(s)) continue;
         if (seen.has(s)) continue;

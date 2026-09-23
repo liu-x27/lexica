@@ -14,6 +14,9 @@
  * 由 Kotlin 侧通过 JavascriptInterface 提供一个同样形状的同步实现。
  * 除此之外整个查询层两端共用，不做分叉。
  */
+// 建库时写进索引的键，查询要按同一套规则算，见 text-keys.js
+const { spaceCJK, soundex, zhSegments } = require('./text-keys');
+
 let nodeFs = null;
 let openDatabase = null;
 
@@ -155,24 +158,6 @@ function isSentence(text) {
   return n >= 4 && /[.!?;:,]/.test(raw.slice(0, -1));
 }
 
-/** 汉字之间插空格（必须与 build-db.mjs 中的 spaceCJK 行为一致） */
-function spaceCJK(s) {
-  if (!s) return '';
-  let out = '';
-  let prevCJK = false;
-  for (const ch of s) {
-    const cjk = ch >= '㐀' && ch <= '鿿';
-    if (cjk) {
-      out += (out && !out.endsWith(' ') ? ' ' : '') + ch;
-    } else {
-      if (prevCJK && ch !== ' ') out += ' ';
-      out += ch;
-    }
-    prevCJK = cjk;
-  }
-  return out;
-}
-
 /** Damerau-Levenshtein，带上限提前退出 */
 function editDistance(a, b, limit = 4) {
   const m = a.length;
@@ -204,46 +189,10 @@ function editDistance(a, b, limit = 4) {
   return prev[n];
 }
 
-function soundex(word) {
-  const s = word.toUpperCase().replace(/[^A-Z]/g, '');
-  if (!s) return '';
-  const code = { B: 1, F: 1, P: 1, V: 1, C: 2, G: 2, J: 2, K: 2, Q: 2, S: 2, X: 2, Z: 2,
-                 D: 3, T: 3, L: 4, M: 5, N: 5, R: 6 };
-  let out = s[0];
-  let last = code[s[0]] || 0;
-  for (let i = 1; i < s.length && out.length < 4; i++) {
-    const c = s[i];
-    const d = code[c] || 0;
-    if (d && d !== last) out += d;
-    if (c !== 'H' && c !== 'W') last = d;
-  }
-  return out.padEnd(4, '0');
-}
-
 /** FTS5 里字符串字面量要用双引号包裹并转义内部双引号 */
 const ftsPhrase = (s) => `"${String(s).replace(/"/g, '""')}"`;
 
 /* ------------------------------------------------- 中文反查相关性打分 */
-
-/** 释义行里的词性缩写与域标记，算覆盖率时要先去掉 */
-const ZH_NOISE = /^(?:[a-z]{1,5}\.\s*)+|^\[[^\]]{1,6}\]\s*|^(?:un|abbr|pl)\.\s*/i;
-
-/**
- * 把一条中文释义拆成若干「语义片段」。
- * 释义形如 "[网络] 高速铁路；高铁；高铁宝山段"，按标点切开后每段是一个独立义项。
- */
-function zhSegments(translation) {
-  const out = [];
-  for (const line of String(translation || '').split(/\r?\n/)) {
-    const isWeb = /^\[网络\]/.test(line);
-    for (const raw of line.split(/[；;，,、]/)) {
-      let s = raw.trim().replace(ZH_NOISE, '').replace(ZH_NOISE, '').trim();
-      s = s.replace(/^\[[^\]]{1,6}\]\s*/, '').trim();
-      if (s) out.push({ text: s, web: isWeb });
-    }
-  }
-  return out;
-}
 
 /**
  * 中文反查的相关性分。

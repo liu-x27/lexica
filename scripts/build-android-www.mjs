@@ -30,10 +30,10 @@ const RENDERER_JS = [
 ];
 
 /** 打进 core.js 的共用模块。名字就是 require 时用的 id */
-/* app-core 是和桌面共用的业务层（查词、生词本、练习、词表）。
-   translate-online 和 sentence-split 是安卓在线翻译要的。
+/* app-core 是和桌面共用的业务层（查词、生词本、练习、词表），text-keys 是
+   dict-db 要的建库/查询共用键。translate-online 和 sentence-split 是安卓在线翻译要的。
    全都是纯 JS，不碰 Node / Electron 接口，WebView 里原样能跑。 */
-const CORE_MODULES = ['dict-db', 'user-db', 'quiz', 'app-core', 'glossary', 'translate-online', 'sentence-split'];
+const CORE_MODULES = ['text-keys', 'dict-db', 'user-db', 'quiz', 'app-core', 'glossary', 'translate-online', 'sentence-split'];
 
 const rel = (p) => path.relative(ROOT, p).replace(/\\/g, '/');
 
