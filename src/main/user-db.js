@@ -687,19 +687,9 @@ class UserDB {
 
   /* --------------------------------------------------- 自定义词表 */
 
-  /** 从一段文本建词表。每行一个词，忽略空行与注释行，自动去重 */
+  /** 从一段文本建词表，解析规则见 parseWordList */
   createList(name, text, note = null) {
-    const words = [];
-    const seen = new Set();
-    for (const line of String(text || '').split(/\r?\n/)) {
-      // 允许 "word  释义" 或 "word,释义" 这类格式，只取第一列
-      const w = line.split(/[\t,，;；]/)[0].trim().replace(/^[-*•\d.、)\s]+/, '').trim();
-      if (!w || w.startsWith('#') || w.length > 64) continue;
-      const key = w.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      words.push(key);
-    }
+    const words = parseWordList(text);
     if (!words.length) return { ok: false, reason: '没有解析出任何单词' };
 
     this.db.exec('BEGIN');
@@ -883,4 +873,25 @@ class UserDB {
 /* 当前 schema 版本 = 迁移条数。测试拿它断言，加迁移时不用改测试 */
 const SCHEMA_VERSION = 5;
 
-module.exports = { UserDB, DAY, SCHEMA_VERSION, MAX_CONTEXTS };
+/**
+ * 一段文本里的单词表：每行一个词，忽略空行与 # 注释行，小写后去重，保持原顺序。
+ * 允许 "word  释义"、"word,释义" 这类格式，只取第一列；去掉行首的列表符号与编号。
+ *
+ * 导入前的预览和真正建表用的是这同一份——规则一旦分开写，预览说的
+ * 「解析出 N 个词」就不再是最后存进去的那 N 个。
+ */
+function parseWordList(text) {
+  const words = [];
+  const seen = new Set();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const w = line.split(/[\t,，;；]/)[0].trim().replace(/^[-*•\d.、)\s]+/, '').trim();
+    if (!w || w.startsWith('#') || w.length > 64) continue;
+    const key = w.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    words.push(key);
+  }
+  return words;
+}
+
+module.exports = { UserDB, DAY, SCHEMA_VERSION, MAX_CONTEXTS, parseWordList };

@@ -13,7 +13,8 @@ const {
 
 const { DictDB } = require('./dict-db');
 const { UserDB } = require('./user-db');
-const { Quiz, SCOPE_LABELS, KIND_LABELS, checkSpelling } = require('./quiz');
+const { createCore, IPC_CHANNELS } = require('./app-core');
+const { Quiz } = require('./quiz');
 const logger = require('./logger');
 const { SelectionWatcher } = require('./selection');
 const { Translator } = require('./translate');
@@ -712,383 +713,44 @@ function registerIpc() {
     appVersion: app.getVersion(),
   }));
 
-  /**
-   * 把用户自建词条包装成和内置词条一样的结构，
-   * 这样渲染层不用为它写第二套逻辑。
-   */
-  const customAsEntry = (row) => ({
-    id: -1,
-    word: row.word,
-    wkey: row.word,
-    isCustom: true,
-    note: row.note || null,
-    lemmaOf: null,
-    weak: false,
-    phon: row.phonetic ? { main: row.phonetic, variants: [], us: null } : null,
-    phonetic: row.phonetic || null,
-    translation: require('./dict-db').parseTranslation(row.translation),
-    translationRaw: row.translation,
-    definition: [],
-    posRatio: [],
-    forms: [],
-    tags: [],
-    collins: 0,
-    oxford: false,
-    bnc: 0,
-    frq: 0,
-    rank: 999999,
-    senses: [],
-    examples: [],
-    examplesByPos: {},
-    relations: { synonyms: [], antonyms: [], hypernyms: [], hyponyms: [] },
-    etym: null,
-    quotes: [],
-    confusables: [],
-  });
+  /* ---- 与安卓共用的业务层 ----
+     查词、生词本、练习、自定义词表与词条都在 app-core.js 里，安卓的 shim 用的是同一份。
+     这里只把它的方法挂到各自的 IPC 通道上；通道表也在 app-core.js，测试会拿它和
+     preload 逐条对账。 */
+  const core = createCore({ dict, user, quiz, emit: broadcast });
+  for (const [channel, method] of Object.entries(IPC_CHANNELS)) handle(channel, core.api[method]);
+  // preload 把这一个的两个参数包成了一个对象
+  handle('wb:removeContext', (p) => core.api.wbRemoveContext(p?.word, p?.index));
 
-  handle('dict:lookup', (word, opts) => {
-    // 自定义词条优先：用户特意补的词，说明内置词库没有或不满意
-    const custom = user.customEntry(word);
-    if (custom) {
-      if (!opts?.noHistory) user.pushHistory(custom.word);
-      const built = dict.lookup(word);
-      return {
-        status: 'ok',
-        entry: customAsEntry(custom),
-        // 内置词库里也有的话，一并告知，让用户能切过去看
-        alsoBuiltin: built.status === 'ok' ? built.entry.word : null,
-        saved: user.isSaved(custom.word),
-        mine: user.entry(custom.word),
-        corrections: [],
-        weak: false,
-      };
-    }
-
-    const res = dict.lookup(word);
-    if (res.status === 'ok') {
-      if (!opts?.noHistory) user.pushHistory(res.entry.word);
-      res.saved = user.isSaved(res.entry.word);
-      // 生词本上的笔记与自有释义是叠加的，词条页要单独排一块
-      res.mine = user.entry(res.entry.word);
-    }
-    return res;
-  });
-
-  handle('dict:suggest', (q, limit) => {
-    const res = dict.suggest(q, limit);
-    // 自建词条排在最前面：用户自己录的，优先级最高
-    const mine = user.customPrefix(q, 5);
-    if (mine.length) {
-      res.groups.unshift({
-        kind: 'custom',
-        title: '我的词条',
-        items: mine.map((r) => ({
-          word: r.word,
-          phonetic: r.phonetic,
-          brief: r.translation.slice(0, 60),
-          tags: [],
-          collins: 0,
-          oxford: false,
-        })),
-      });
-    }
-    return res;
-  });
-  handle('dict:search', (q, limit) => dict.search(q, limit));
-  handle('dict:random', () => dict.randomWord());
-  handle('dict:terms', (text) => dict.termsIn(text));
-
-  /* ---- 生词本 ---- */
-  handle('wb:toggle', (word) => {
-    const r = user.toggle(word);
-    broadcast('wb:changed', user.counts());
-    return r;
-  });
-  handle('wb:isSaved', (word) => user.isSaved(word));
-  handle('wb:list', (opts) => {
-    // 补上中文释义与难度标签，生词本列表才有内容可看。
-    // 用 briefMany 一次批量取：逐个 lookup() 会连义项、例句、词源一起查出来，
-    // 而列表只用得上音标和前两条释义。
-    const rows = user.list(opts);
-    const brief = dict.briefMany(rows.map((r) => r.word));
-    return rows.map((row) => {
-      const b = brief.get(String(row.word).toLowerCase());
-      const mine = user.customEntry(row.word);
-      return {
-        ...row,
-        myDef: row.my_def || null,
-        phonetic: b?.phonetic || mine?.phonetic || null,
-        /* 列表只有一行位置，优先给自己写的——那是用户特意记下来的，
-           而词库释义在词条页随时能看到。 */
-        brief: row.my_def || b?.brief || mine?.translation || '',
-        /* 词库里到底有没有这个词，界面要能区分：
-           自己加的词组点进去是没有词条页的，得给不同的提示。 */
-        inDict: !!b,
-        tags: b?.tags.map((t) => t.code) || [],
-        collins: b?.collins || 0,
-      };
-    });
-  });
-
-  /** 单条生词本记录（编辑框要用），连词库摘要一起给 */
-  handle('wb:get', (word) => {
-    const row = user.entry(word);
-    const b = dict.briefMany([word]).get(String(word || '').toLowerCase());
-    return {
-      row: row || null,
-      saved: !!row,
-      dictBrief: b?.brief || null,
-      phonetic: b?.phonetic || null,
-      inDict: !!b,
-    };
-  });
-
-  /** 手动添加。词库里没有的词组只能走这条路进生词本 */
-  handle('wb:add', (payload) => {
-    const r = user.addWord(payload?.word, { note: payload?.note, myDef: payload?.myDef });
-    if (r.ok) broadcast('wb:changed', user.counts());
-    return r;
-  });
-
-  /**
-   * 带语境收藏：在字幕、翻译页、历史转写稿里点词，按下「收进生词本」走这里。
-   * 语境单独存（wordbook.contexts），不碰用户自己写的笔记。
-   */
-  handle('wb:addContext', (payload) => {
-    const r = user.addContext(payload?.word, {
-      en: payload?.en, zh: payload?.zh, src: payload?.src,
-    });
-    if (r.ok) broadcast('wb:changed', user.counts());
-    return r;
-  });
-
-  handle('wb:removeContext', (payload) => user.removeContext(payload?.word, payload?.index));
-
-  /** 写/改注释（笔记 + 我的释义） */
-  handle('wb:annotate', (payload) => {
-    const r = user.annotate(payload?.word, { note: payload?.note, myDef: payload?.myDef });
-    if (r.ok) broadcast('wb:changed', user.counts());
-    return r;
-  });
-
-  handle('wb:remove', (word) => {
-    const r = user.remove(word);
-    broadcast('wb:changed', user.counts());
-    return r;
-  });
-  handle('wb:counts', () => user.counts());
-  handle('wb:due', (limit) => {
-    return user.dueQueue(limit).map((row) => {
-      const r = dict.lookup(row.word, { noHistory: true });
-      /* 自己加的词组词库里查不到，entry 会是 null。
-         这时用自建词条兜一层，否则复习卡上一个字都没有，卡片没法答。 */
-      let entry = r.status === 'ok' ? r.entry : null;
-      if (!entry) {
-        const mine = user.customEntry(row.word);
-        if (mine) entry = customAsEntry(mine);
-      }
-      return { card: row, entry, myDef: row.my_def || null, note: row.note || null };
-    });
-  });
-  handle('wb:grade', (word, grade) => {
-    const r = user.grade(word, grade);
-    broadcast('wb:changed', user.counts());
-    return r;
-  });
-
+  /* 两个导出：内容由 app-core 生成（安卓生成的是同一份），存到哪里由这里问用户 */
   handle('wb:export', async (format) => {
-    const words = user.allWords();
-    if (!words.length) return { ok: false, reason: '生词本还是空的' };
-
+    const file = core.wordbookFile(format);
+    if (!file.ok) return file;
     const isAnki = format === 'anki';
     const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
       title: isAnki ? '导出为 Anki 可导入的 TSV' : '导出为 CSV',
-      defaultPath: `lexica-wordbook-${new Date().toISOString().slice(0, 10)}.${isAnki ? 'tsv' : 'csv'}`,
+      defaultPath: file.filename,
       filters: isAnki ? [{ name: 'TSV', extensions: ['tsv'] }] : [{ name: 'CSV', extensions: ['csv'] }],
     });
     if (canceled || !filePath) return { ok: false, reason: '已取消' };
-
-    const esc = (s) => {
-      const v = String(s ?? '');
-      return isAnki ? v.replace(/[\t\n\r]+/g, ' ') : `"${v.replace(/"/g, '""')}"`;
-    };
-    const sep = isAnki ? '\t' : ',';
-    const lines = [];
-    if (!isAnki) {
-      lines.push(['单词', '音标', '释义', '我的释义', '我的笔记', '出处', '例句', '难度标签', '加入时间', '复习次数']
-        .map(esc).join(sep));
-    }
-
-    for (const w of words) {
-      const r = dict.lookup(w.word, { noHistory: true });
-      const e = r.status === 'ok' ? r.entry : null;
-      const mine = e ? null : user.customEntry(w.word);
-      const dictMean = e
-        ? e.translation.map((t) => (t.pos ? `${t.pos}. ${t.text}` : t.text)).join(isAnki ? '<br>' : '；')
-        : (mine?.translation || '');
-      const ex = e?.examples?.[0] ? `${e.examples[0].en}${e.examples[0].zh ? (isAnki ? '<br>' : ' ') + e.examples[0].zh : ''}` : '';
-      /* Anki 那边列数固定（正面/背面…），自己写的内容拼进背面，
-         不能多加两列——多了导入时字段会错位。 */
-      /* 出处：在哪句话里遇到的。只放最近一条——Anki 背面放多了反而干扰，
-         CSV 里给全，一条一行。 */
-      const ctxs = (w.contexts || []).map((c) => `${c.en}${c.src ? `（${c.src}）` : ''}`);
-      const anki = [
-        w.word,
-        e?.phonetic || mine?.phonetic || '',
-        [w.my_def, dictMean, w.note && `【笔记】${w.note}`, ctxs[0] && `【出处】${ctxs[0]}`]
-          .filter(Boolean).join('<br>'),
-        ex,
-        (e?.tags || []).map((t) => t.label).join(' '),
-        new Date(w.added_at).toISOString().slice(0, 10),
-        w.reps,
-      ];
-      const csv = [
-        w.word,
-        e?.phonetic || mine?.phonetic || '',
-        dictMean,
-        w.my_def || '',
-        w.note || '',
-        ctxs.join(' / '),
-        ex,
-        (e?.tags || []).map((t) => t.label).join(' '),
-        new Date(w.added_at).toISOString().slice(0, 10),
-        w.reps,
-      ];
-      lines.push((isAnki ? anki : csv).map(esc).join(sep));
-    }
-
-    // Excel 打开 CSV 需要 BOM 才能正确识别 UTF-8
-    fs.writeFileSync(filePath, (isAnki ? '' : '﻿') + lines.join('\r\n'), 'utf8');
-    return { ok: true, filePath, count: words.length };
+    fs.writeFileSync(filePath, file.content, 'utf8');
+    return { ok: true, filePath, count: file.count };
   });
 
   handle('wb:revealExport', (p) => { if (p) shell.showItemInFolder(p); });
 
-  /* ---- 考纲练习 ---- */
-  handle('drill:scopes', () =>
-    quiz.scopes().map((s) => ({ ...s, progress: user.scopeProgress(s.scope) })),
-  );
-  handle('drill:progress', (scope) => user.scopeProgress(scope));
-  handle('drill:study', (scope, count) => quiz.studyBatch(scope, count));
-  handle('drill:quiz', (scope, count, kinds) => quiz.batch(scope, count, { kinds }));
-  handle('drill:assess', (scope, count) => quiz.assessmentBatch(scope, count));
-
-  handle('drill:answer', (payload) => {
-    user.recordAnswer(payload);
-    return { ok: true };
-  });
-
-  handle('drill:finish', (payload) => {
-    user.saveSession(payload);
-    return user.scopeProgress(payload.scope);
-  });
-
-  handle('drill:mark', (word, scope, known) => {
-    user.markWord(word, scope, known);
-    // 标记为不认识的词直接进生词本，省一步操作
-    if (!known && !user.isSaved(word)) {
-      user.toggle(word);
-      broadcast('wb:changed', user.counts());
-    }
-    return { ok: true, saved: user.isSaved(word) };
-  });
-
-  handle('drill:weak', (scope, limit) => {
-    const rows = user.weakWords(scope, limit);
-    return rows.map((r) => {
-      const res = dict.lookup(r.word, { noHistory: true });
-      return { ...r, entry: res.status === 'ok' ? res.entry : null };
-    });
-  });
-
-  /** 错题重练：拿错得最多的词现场出题 */
-  handle('drill:weakQuiz', (scope, count) => {
-    const rows = user.weakWords(scope, count * 3);
-    const out = [];
-    for (const r of rows) {
-      if (out.length >= count) break;
-      const row = dict.q.exact.get(String(r.word).toLowerCase());
-      if (!row) continue;
-      for (const kind of ['en2zh', 'zh2en', 'cloze']) {
-        const q = quiz.makeQuestion(scope, row, kind);
-        if (q) { out.push(q); break; }
-      }
-    }
-    return out;
-  });
-
-  handle('drill:labels', () => ({ scopes: SCOPE_LABELS, kinds: KIND_LABELS }));
-  handle('drill:checkSpell', (input, answer) => checkSpelling(input, answer));
-
-  /** 导出练习进度：范围汇总 + 错题明细，一份 CSV */
   handle('drill:export', async (onlyScope) => {
-    const scopes = quiz.scopes().filter((s) => !onlyScope || s.scope === onlyScope);
-    if (!scopes.length) return { ok: false, reason: '没有可导出的范围' };
-
-    const name = onlyScope ? `lexica-${onlyScope}` : 'lexica-练习进度';
+    const file = core.drillFile(onlyScope);
+    if (!file.ok) return file;
     const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
       title: '导出练习进度',
-      defaultPath: `${name}-${new Date().toISOString().slice(0, 10)}.csv`,
+      defaultPath: file.filename,
       filters: [{ name: 'CSV', extensions: ['csv'] }],
     });
     if (canceled || !filePath) return { ok: false, reason: '已取消' };
-
-    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [];
-    let weakTotal = 0;
-
-    lines.push('# 范围汇总');
-    lines.push(['范围', '可练词量', '已掌握', '待巩固', '累计答题', '正确率', '上次检测掌握率', '检测时间']
-      .map(esc).join(','));
-
-    for (const s of scopes) {
-      const p = user.scopeProgress(s.scope);
-      lines.push([
-        s.label,
-        s.quizzable,
-        p.mastered,
-        p.shaky,
-        p.answered,
-        p.accuracy == null ? '' : `${Math.round(p.accuracy * 100)}%`,
-        p.lastAssessment ? `${Math.round(p.lastAssessment.rate * 100)}%` : '',
-        p.lastAssessment ? new Date(p.lastAssessment.at).toLocaleString('zh-CN') : '',
-      ].map(esc).join(','));
-    }
-
-    lines.push('');
-    lines.push('# 错题明细');
-    lines.push(['范围', '单词', '音标', '释义', '答题次数', '答对', '答错', '难度标签']
-      .map(esc).join(','));
-
-    for (const s of scopes) {
-      for (const w of user.weakWords(s.scope, 500)) {
-        const r = dict.lookup(w.word, { noHistory: true });
-        const e = r.status === 'ok' ? r.entry : null;
-        lines.push([
-          s.label,
-          w.word,
-          e?.phon?.main || '',
-          e ? e.translation.map((t) => (t.pos ? `${t.pos}. ${t.text}` : t.text)).join('；') : '',
-          w.seen,
-          w.hit,
-          w.miss,
-          (e?.tags || []).map((t) => t.label).join(' '),
-        ].map(esc).join(','));
-        weakTotal++;
-      }
-    }
-
-    // Excel 打开 CSV 需要 BOM 才能认出 UTF-8
-    fs.writeFileSync(filePath, `﻿${lines.join('\r\n')}`, 'utf8');
-    return { ok: true, filePath, scopes: scopes.length, weak: weakTotal };
+    fs.writeFileSync(filePath, file.content, 'utf8');
+    return { ok: true, filePath, scopes: file.scopes, weak: file.weak };
   });
-
-  /* ---- 学习统计 ---- */
-  handle('stats:heatmap', (days) => user.heatmap(days));
-
-  /* ---- 历史 ---- */
-  handle('hist:recent', (limit) => user.recent(limit));
-  handle('hist:clear', () => { user.clearHistory(); return { ok: true }; });
 
   /* ---- 设置 ---- */
   handle('set:all', () => settings);
@@ -2188,43 +1850,7 @@ function registerIpc() {
     else shell.openPath(path.join(app.getPath('userData'), 'logs'));
   });
 
-  /* ---- 自定义词表 ---- */
-  handle('list:all', () =>
-    user.lists().map((l) => ({ ...l, scope: `list:${l.id}` })));
-
-  handle('list:create', (name, text, note) => {
-    const r = user.createList(name, text, note);
-    if (r.ok) quiz.invalidateCustom();
-    return r;
-  });
-
-  handle('list:delete', (id) => {
-    const r = user.deleteList(id);
-    if (r.ok) quiz.invalidateCustom();
-    return r;
-  });
-
-  handle('list:preview', (text) => {
-    // 导入前先告诉用户：解析出多少词、词库里能查到多少
-    const words = [];
-    const seen = new Set();
-    for (const line of String(text || '').split(/\r?\n/)) {
-      const w = line.split(/[\t,，;；]/)[0].trim().replace(/^[-*•\d.、)\s]+/, '').trim();
-      if (!w || w.startsWith('#') || w.length > 64) continue;
-      const k = w.toLowerCase();
-      if (seen.has(k)) continue;
-      seen.add(k);
-      words.push(k);
-    }
-    let known = 0;
-    const missing = [];
-    for (const w of words) {
-      if (dict.lookup(w, { noHistory: true }).status === 'ok') known++;
-      else if (missing.length < 12) missing.push(w);
-    }
-    return { total: words.length, known, missing };
-  });
-
+  /* ---- 自定义词表：导入文件要弹系统对话框，只有这一个是桌面自己的 ---- */
   handle('list:importFile', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
       title: '导入单词表',
@@ -2239,12 +1865,6 @@ function registerIpc() {
       return { ok: false, reason: e.message };
     }
   });
-
-  /* ---- 自定义词条 ---- */
-  handle('custom:all', (limit) => user.customEntries(limit || 500));
-  handle('custom:get', (word) => user.customEntry(word));
-  handle('custom:put', (entry) => user.putCustomEntry(entry));
-  handle('custom:delete', (word) => user.deleteCustomEntry(word));
 
   handle('app:openDataFolder', () => {
     const p = path.dirname(resolveDictPath());

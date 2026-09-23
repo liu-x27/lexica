@@ -376,17 +376,57 @@ test('www 里的渲染层与 src/renderer 逐字节一致', { skip: !hasAssets }
   }
 });
 
-test('shim 覆盖了 preload 暴露的全部接口', { skip: !hasAssets }, () => {
+test('shim 覆盖了 preload 暴露的全部接口', { skip: !hasAssets || !hasDict }, () => {
   const preload = fs.readFileSync(path.join(ROOT, 'src/main/preload.js'), 'utf8');
-  const shim = fs.readFileSync(path.join(WWW, 'js/lexica-shim.js'), 'utf8');
 
   // 取 contextBridge 暴露对象里的键名
   const body = preload.slice(preload.indexOf('exposeInMainWorld'));
   const names = [...body.matchAll(/^\s{2}(\w+):/gm)].map((m) => m[1]);
   assert.ok(names.length > 30, `没解析出接口名，只找到 ${names.length} 个`);
 
-  const missing = names.filter((n) => !new RegExp(`\\b${n}\\s*:`).test(shim) && !new RegExp(`api\\.${n}\\s*=`).test(shim));
+  /* 查真正启动起来的 window.lexica，不查源码文本：共用的那一大半是从 app-core
+     展开进来的，源码里根本看不到方法名。 */
+  const s = bootShim(tmpUser(), async () => ({}));
+  const missing = names.filter((n) => typeof s.lexica[n] !== 'function');
+  s.AndroidSql._close();
   assert.deepEqual(missing, [], `安卓 shim 缺少这些接口，渲染层调用时会崩`);
+});
+
+/* 下面两条原先都是安卓版的真 bug：shim 手抄了一份桌面的处理函数，抄漏了。
+   现在两边用的是 app-core 同一份实现，这两条盯着它别再分叉。 */
+
+test('安卓：词表带着练习范围，「去练习」不会把范围存成空串', { skip: !hasAssets || !hasDict }, async () => {
+  const s = bootShim(tmpUser(), async () => ({}));
+  const r = await s.lexica.listCreate('课程词表', 'apple\nbanana', null);
+  assert.equal(r.ok, true);
+  const [list] = await s.lexica.lists();
+  assert.equal(list.scope, `list:${r.id}`);
+  const scopes = (await s.lexica.drillScopes()).map((x) => x.scope);
+  assert.ok(scopes.includes(list.scope), '词表的范围名必须是练习页认得的那一个');
+  s.AndroidSql._close();
+});
+
+test('安卓：生词本导出和桌面一样，带着我的释义、笔记、出处和例句', { skip: !hasAssets || !hasDict }, async () => {
+  const s = bootShim(tmpUser(), async () => ({}));
+  const shared = [];
+  s.AndroidApp.saveAndShare = (filename, content) => {
+    shared.push({ filename, content });
+    return JSON.stringify({ ok: true, path: `/tmp/${filename}` });
+  };
+  await s.lexica.wbAdd({ word: 'apple', note: '水果', myDef: '我的苹果' });
+  await s.lexica.wbAddContext({ word: 'apple', en: 'An apple a day.', src: '第一课' });
+
+  const r = await s.lexica.wbExport('csv');
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.count, 1);
+  const [header, row] = shared[0].content.replace(/^\uFEFF/, '').split('\r\n');
+  assert.equal(header, ['单词', '音标', '释义', '我的释义', '我的笔记', '出处', '例句', '难度标签', '加入时间', '复习次数']
+    .map((h) => `"${h}"`).join(','));
+  assert.ok(shared[0].content.startsWith('\uFEFF'), 'Excel 要靠 BOM 认出 UTF-8');
+  for (const v of ['我的苹果', '水果', 'An apple a day.（第一课）']) {
+    assert.ok(row.includes(`"${v}"`), `导出行里没有 ${v}：${row}`);
+  }
+  s.AndroidSql._close();
 });
 
 /* ====================================================================== */
