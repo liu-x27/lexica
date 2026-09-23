@@ -254,9 +254,17 @@ The Android build reuses the desktop renderer verbatim. `npm run build:www` asse
 files are **byte-identical** between the two — the copy cannot drift silently. What
 differs is bridged:
 
-- `cjs-runtime.js` — a minimal CommonJS loader, since the renderer is CJS and a WebView is not
+- `cjs-runtime.js` — a minimal CommonJS loader, since the shared `src/main` modules are
+  CommonJS and a WebView is not
 - `android-sqlite.js` — a `node:sqlite`-shaped shim over a Kotlin `SqlBridge`
 - Kotlin side: `AppBridge`, `SqlBridge`, `TtsBridge`
+
+The business logic behind the UI is shared the same way. Lookup, the wordbook, drills and
+word lists live in `src/main/app-core.js`, which the desktop mounts on IPC channels and the
+Android shim spreads into `window.lexica`. The shim keeps only what the platform changes —
+the share sheet instead of a save dialog, a document picker, honest stubs for what is not
+there. It used to hold a hand copy of the rest, and the copy had drifted: Android's word
+lists had no drill scope, and its wordbook export was missing four columns.
 
 The bridge detail that cost the most time is in
 [docs/android-port.md](docs/android-port.md): `SQLiteDatabase.execSQL()` refuses any
@@ -294,16 +302,17 @@ For Android: `npm run build:db:mobile` (a 383 MB slim database), then `npm run a
 ## Layout
 
 ```
-src/main/        electron main process — dict-db, asr, lecture, vad-chunker,
-                 glossary + glossary-packs, translate + translate-online,
-                 sentence-split, word-at, transcript-search, quiz, user-db,
-                 selection (Windows UI Automation)
+src/main/        electron main process — app-core (shared with Android), dict-db,
+                 text-keys, asr, lecture, vad-chunker, glossary + glossary-packs,
+                 translate + translate-online, sentence-split, word-at,
+                 transcript-search, quiz, user-db, selection (Windows UI
+                 Automation), self-test (npm run shot)
 src/renderer/    the UI, shared verbatim with Android
 scripts/         corpus download, database build, mobile slim build, APK build,
                  MT and ASR model evaluation harnesses
 android/         Kotlin host + generated www assets
-test/            210 tests across 42 suites, node:test, no network. 135 run on a
-                 fresh clone; the other 75 need data/dict.db from npm run data
+test/            node:test, no network. Suites that need data/dict.db (from
+                 npm run data) skip on a fresh clone
 ```
 
 ## Status
