@@ -2578,6 +2578,26 @@ async function runShotSequence(dir) {
   await view('custom');
   await shot('28-custom-lists');
 
+  /* 自定义页的「去练习」：要切到练习页、进这个词表的练习菜单。
+     它原先点了没反应——app.js 里有两个 case 'drill-scope'，只有前一个生效，
+     那个只刷新了看不见的练习页。截图里看不出来，所以这里断言落点。
+     走真实的建表表单，不直接调 listCreate：表单那条路会清掉练习页缓存的范围列表。 */
+  await mainWin.webContents.executeJavaScript(`
+    document.querySelector('#clName').value = '自测词表';
+    document.querySelector('#clText').value = 'apple\\nbanana\\ncherry';
+  `);
+  await click('[data-act="cl-create"]', 900);
+  await click('button[data-act="drill-scope"][data-scope^="list:"]', 1200);
+  const landed = await mainWin.webContents.executeJavaScript(`({
+    active: !!document.querySelector('#view-drill.is-active'),
+    title: document.querySelector('#view-drill .wb-title')?.textContent || null,
+  })`);
+  if (!landed.active || landed.title !== '自测词表') {
+    throw new Error(`[shot] 「去练习」没有进到这个词表的练习菜单：${JSON.stringify(landed)}`);
+  }
+  console.log('[shot] 自定义页「去练习」进到了词表的练习菜单');
+  await shot('28b-custom-list-drill');
+
   /* 在线翻译默认关，而 shot 用的是每次全新的 profile，
      所以要验证在线那条链路只能靠这个开关。 */
   if (process.env.LEXICA_SHOT_ONLINE) {

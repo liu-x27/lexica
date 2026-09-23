@@ -1151,8 +1151,14 @@
             return;
           }
 
-          /* ---- 考纲练习 ---- */
-          case 'drill-scope': return drillPickScope(actEl.dataset.scope);
+          /* ---- 考纲练习 ----
+             范围卡片在练习页里，「去练习」在自定义页里，两处发的是同一个动作。
+             这里原先有两个 case 'drill-scope'，switch 只认第一个，
+             自定义页那个按钮就只刷新了看不见的练习页，界面不动。 */
+          case 'drill-scope': {
+            if (state.view !== 'drill') { switchView('drill'); await loadDrill(); }
+            return drillPickScope(actEl.dataset.scope);
+          }
           case 'drill-back': {
             D().stage = 'scopes';
             return paintDrill();
@@ -1316,12 +1322,6 @@
             if (!r?.ok) { toast(r?.reason || '探测失败'); return; }
             toast('探测完成');
             return loadCustom();
-          }
-
-          case 'drill-scope': {
-            switchView('drill');
-            await loadDrill();
-            return drillPickScope(actEl.dataset.scope);
           }
 
           /* ---- 翻译 ---- */
