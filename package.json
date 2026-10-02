@@ -20,6 +20,7 @@
     "fetch:asr": "node --no-warnings scripts/fetch-asr.mjs",
     "eval:mt:all": "node --no-warnings scripts/eval-mt-candidates.mjs --run",
     "eval:mt": "node --no-warnings scripts/eval-mt.mjs",
+    "eval:asr": "node --no-warnings scripts/asr-quality.mjs",
     "icon": "electron scripts/make-icon.js",
     "pack": "node --no-warnings scripts/pack.mjs",
     "build:db:mobile": "node --no-warnings --max-old-space-size=6144 scripts/build-db-mobile.mjs --slim",

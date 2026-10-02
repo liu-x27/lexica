@@ -15,7 +15,7 @@
  *   + --audio-ctx 512        1.25s  4.00x  ← 决定性的那个参数
  * 文本三者逐字相同。audio-ctx 的取值不能随便定，见 _spawn 里的注释。
  *
- * 质量实测（同一段 127 词的音频，按 WER 打分，脚本见 scratchpad/asr-quality.mjs）：
+ * 质量实测（同一段 127 词的音频，按 WER 打分，npm run eval:asr，脚本是 scripts/asr-quality.mjs）：
  *   base  贪心                4.7%   最慢段  314ms   19.3x
  *   base  + beam5             6.3%   ← beam search 对 base 反而有害
  *   base  + 领域提示词        3.1%           648ms   13.3x

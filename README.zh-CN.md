@@ -111,6 +111,7 @@ scripts/
   fetch-data.mjs   下载 + 解包（自建 CONNECT 隧道、断点续传、镜像回源校验）
   build-db.mjs     三份数据合并建库、建索引、建全文检索与纠错候选
   pack.mjs         手工打包免安装版
+  asr-quality.mjs  识别质量对比：七种配置按 WER 打分（npm run eval:asr）
   probe-glossary-carriers.js  实验：怎么问模型才能拿到它在句子里的错译写法
 src/main/
   index.js         窗口、托盘、全局热键、IPC
@@ -375,7 +376,7 @@ whisper.cpp 在 5 秒分段上是 4 倍实时余量。它是独立 exe 而不是
 
 ### 识别质量：三个可调项的实测
 
-同一段 127 词的音频，按 WER（词错误率）打分（`scratchpad/asr-quality.mjs`）：
+同一段 127 词的音频，按 WER（词错误率）打分（`npm run eval:asr` 可复现，音频是 `scripts/fixtures/lecture.wav`）：
 
 | 配置 | WER | 最慢段 | 实时倍率 |
 |---|---|---|---|

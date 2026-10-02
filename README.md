@@ -113,7 +113,7 @@ Getting it usable took three changes:
 | | conditions |
 |---|---|
 | 0.58× → 4.00× | 5-second chunks, ONNX Whisper against a resident `whisper.cpp` server, my hardware |
-| 0.8% WER | one 127-word clip synthesized from a lecture script, so there is a reference to score against — cleaner than a classroom; `small` + beam-5 + domain prompt |
+| 0.8% WER | one 127-word clip synthesized from a lecture script, so there is a reference to score against — cleaner than a classroom; `small` + beam-5 + domain prompt; `npm run eval:asr` reproduces it |
 
 The shipped default is that last configuration, and it runs at **3.7×**, not 4.0× — beam
 search and prompting buy accuracy with throughput. The 4.00× is what the runtime change
