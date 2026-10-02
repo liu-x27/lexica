@@ -16,15 +16,16 @@
  * 文本三者逐字相同。audio-ctx 的取值不能随便定，见 _spawn 里的注释。
  *
  * 质量实测（同一段 127 词的音频，按 WER 打分，npm run eval:asr，脚本是 scripts/asr-quality.mjs）：
- *   base  贪心                4.7%   最慢段  314ms   19.3x
- *   base  + beam5             6.3%   ← beam search 对 base 反而有害
- *   base  + 领域提示词        3.1%           648ms   13.3x
- *   small 贪心                4.7%          1289ms    5.1x
- *   small + 提示词            1.6%          1628ms    3.8x
- *   small + beam5 + 提示词    0.8%          1702ms    3.7x  ← 默认用这套
+ *   base  贪心                4.7%   最慢段  111ms   50.2x
+ *   base  + beam5             6.3%           199ms   31.9x  ← beam search 对 base 反而有害
+ *   base  + 领域提示词        3.1%           172ms   34.1x
+ *   small 贪心                4.7%           355ms   15.9x
+ *   small + 提示词            1.6%           534ms   10.9x
+ *   small + beam5 + 提示词    0.8%           656ms    9.1x  ← 默认用这套
+ * （10-02 重跑；9-15 第一次测时默认配置只有 3.7x，运行时和模型没变，WER 逐项相同。）
  *
  * **早先「small 跑不动实时（0.62x）」的结论是错的**：那是用 whisper-cli
- * 每段重载模型、且没有 audio-ctx 时测的。常驻服务 + audio-ctx 之后它有 3.7 倍余量。
+ * 每段重载模型、且没有 audio-ctx 时测的。常驻服务 + audio-ctx 之后它有 9 倍余量。
  * 领域提示词是单项收益最大的一项（错词 6 → 2），成本只有几百毫秒。
  *
  * 另外分段不能按固定时长切（会把句子剖开），交给 vad-chunker.js 按静音切。
@@ -41,7 +42,7 @@ const { EventEmitter } = require('node:events');
 const ASR_MODELS = {
   tiny: { file: 'ggml-tiny.en-q5_1.bin', label: '最快（tiny）', realtime: true, beam: 1 },
   base: { file: 'ggml-base.en-q5_1.bin', label: '均衡（base）', realtime: true, beam: 1 },
-  /* small 也能实时：3.7 倍余量、WER 0.8%。
+  /* small 也能实时：9 倍余量、WER 0.8%。
      beam search 只在 small 上有正收益（1.6% → 0.8%），base 上反而变差（4.7% → 6.3%），
      所以每档各自带自己的 beam 设置。 */
   small: { file: 'ggml-small.en-q5_1.bin', label: '最准（small，推荐）', realtime: true, beam: 5 },

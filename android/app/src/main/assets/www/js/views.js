@@ -596,8 +596,8 @@
           <div class="label-rule"><span class="label">实时字幕</span></div>
           ${
             stats.asr?.available
-              ? row('识别模型', `听写用的模型。本机实测：最准（small，默认）约 3.7 倍实时、
-                  词错率 0.8%；均衡（base）约 13 倍、3.1%。机器吃力、字幕跟不上时再换成均衡。`,
+              ? row('识别模型', `听写用的模型。本机实测：最准（small，默认）约 9 倍实时、
+                  词错率 0.8%；均衡（base）约 34 倍、3.1%。机器吃力、字幕跟不上时再换成均衡。`,
                   `<div class="seg">${(stats.asr.models || []).map((m) => `
                     <button class="seg-btn ${(s.asrModel || 'small') === m.key ? 'is-on' : ''}"
                             data-act="asr-model" data-v="${m.key}">${esc(m.label)}</button>`).join('')}</div>`)

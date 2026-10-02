@@ -363,7 +363,7 @@
         corpora they came from, so one rule, not a model, ranks the <strong>3.24 million that no source
         vouches for</strong> below the 162 thousand that at least one does. A typo still resolves, and says
         it is probably a typo. The captioner writes a lecture down in English with a Chinese gloss under
-        each line, at <strong>3.7× real time</strong>, and by default sends nothing anywhere.
+        each line, at <strong>9.1× real time</strong>, and by default sends nothing anywhere.
       </p>
       <div class="ctas">
         <a class="btn primary" href="https://github.com/liu-x27/lexica">View on GitHub</a>
@@ -498,12 +498,14 @@
       <div class="grid g3" style="margin-top: 40px">
         <div class="card"><span class="tag">src/main/asr.js</span><h3>A resident whisper.cpp server</h3><p>ONNX Whisper ran 5-second chunks at 0.58× real time, behind the speaker for good. A warm <code>whisper.cpp</code> process ran them at 1.50×.</p></div>
         <div class="card"><span class="tag">--audio-ctx</span><h3>The encoder window, bounded</h3><p>Whisper encodes 30 s even for 5. Shrinking the window took 1.50× to <strong>4.00×</strong> with the text unchanged. Too small, and it loops; so it is derived from the chunk limit.</p></div>
-        <div class="card"><span class="tag">small · beam 5 · prompt</span><h3>The shipped default</h3><p><strong>0.8% WER</strong> at 3.7×, where <code>base</code> greedy scored 4.7%. Beam search made <code>base</code> worse, 6.3%, so beam is set per model.</p></div>
+        <div class="card"><span class="tag">small · beam 5 · prompt</span><h3>The shipped default</h3><p><strong>0.8% WER</strong> at 9.1×, where <code>base</code> greedy scored 4.7%. Beam search made <code>base</code> worse, 6.3%, so beam is set per model.</p></div>
       </div>
       <p class="fineprint">
-        Neither number is a benchmark. The speeds are this machine, 5-second chunks; the WER is one 127-word
-        clip synthesized from a lecture script so there is a reference to score against, cleaner than a
-        classroom. Throughput is not latency: 3.7× says audio is processed faster than it arrives. Splitting
+        None of these is a benchmark. 0.58×, 1.50× and 4.00× compare runtimes on 5-second chunks of
+        <code>base.en</code>. 9.1× and the WER are one 127-word clip synthesized from a lecture script, so there is a
+        reference to score against, cleaner than a classroom; the same runtime gave 3.7× the day the table
+        was first measured, and every WER came back identical. Throughput is not latency: 9.1× says audio is
+        processed faster than it arrives. Splitting
         is on pauses, with a threshold that follows the room’s noise floor, never on a fixed clock that cuts
         sentences in half. The full table is in the
         <a href="https://github.com/liu-x27/lexica/blob/main/README.zh-CN.md#识别质量三个可调项的实测">Chinese README</a>,

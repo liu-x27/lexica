@@ -26,7 +26,7 @@ both run with the network cable pulled out, on Windows and Android from one sour
 
 <br>
 
-| **3.40 M** | **3.24 M** | **3.7×** | **~80%** |
+| **3.40 M** | **3.24 M** | **9.1×** | **~80%** |
 |:---:|:---:|:---:|:---:|
 | entries from five open sources, in one 1,260 MB SQLite file | of them ranked down by one rule: no frequency rank, no Collins rating, no syllabus tag, no WordNet entry | real time for the shipped captioning settings, on my hardware | of a caption's delay is the speaker's pause; translation is 5% |
 
@@ -115,10 +115,11 @@ Getting it usable took three changes:
 | 0.58× → 4.00× | 5-second chunks, ONNX Whisper against a resident `whisper.cpp` server, my hardware |
 | 0.8% WER | one 127-word clip synthesized from a lecture script, so there is a reference to score against — cleaner than a classroom; `small` + beam-5 + domain prompt; `npm run eval:asr` reproduces it |
 
-The shipped default is that last configuration, and it runs at **3.7×**, not 4.0× — beam
-search and prompting buy accuracy with throughput. The 4.00× is what the runtime change
-alone bought, on the faster settings. And throughput is not latency: 3.7× says audio is
-processed faster than it arrives, not how far behind a caption appears. The full
+The shipped default is that last configuration, and it runs at **9.1×** real time (9.9× on
+another run). When the table was first measured, the same runtime and models gave it
+3.7×, most likely because of the laptop's load or power mode that day; every WER came
+back identical. And throughput is not latency: 9.1× says audio is processed faster than it
+arrives, not how far behind a caption appears. The full
 per-configuration table, including the two settings that made WER *worse*, is in the
 [Chinese README](README.zh-CN.md#识别质量三个可调项的实测).
 

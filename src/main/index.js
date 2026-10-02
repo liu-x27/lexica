@@ -140,7 +140,7 @@ const DEFAULTS = {
    */
   lectureMtModel: 'opus',
   /* 识别模型。实测 WER：tiny 未测 / base 4.7% / small + beam + 提示词 0.8%。
-     small 在常驻服务 + audio-ctx 下有 3.7 倍实时余量，所以默认用它——
+     small 在常驻服务 + audio-ctx 下有 9 倍实时余量，所以默认用它——
      早先「small 跑不动」是拿旧配置测出来的错结论。 */
   asrModel: 'small',
   /**
