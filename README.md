@@ -1,7 +1,33 @@
-# Lexica
+<div align="center">
+
+<a href="https://liu-x27.github.io/lexica/">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.svg">
+  <img alt="Lexica" src="docs/brand/lockup-light.svg" width="340">
+</picture>
+</a>
+
+### `recieve` still resolves. It just ranks below `receive`.
 
 A 3.4-million-entry English–Chinese dictionary and a real-time lecture captioner that
-both run with the network cable pulled out.
+both run with the network cable pulled out, on Windows and Android from one source tree.
+
+![Electron](https://img.shields.io/badge/Electron-desktop-1c1a17?style=flat-square&logo=electron&logoColor=white)
+![node:sqlite](https://img.shields.io/badge/node%3Asqlite-FTS5-1c1a17?style=flat-square&logo=sqlite&logoColor=white)
+![whisper.cpp](https://img.shields.io/badge/whisper.cpp-live_captions-b3402f?style=flat-square)
+![Android](https://img.shields.io/badge/Android-same_source_tree-1c1a17?style=flat-square&logo=android&logoColor=white)
+![No native modules](https://img.shields.io/badge/native_modules-none-1c1a17?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-270-1c1a17?style=flat-square)
+
+**[Project page](https://liu-x27.github.io/lexica/)** · [The dictionary](#the-dictionary) · [Captions](#real-time-captioning) · [Two platforms](#one-source-tree-two-platforms) · [Running it](#running-it) · [中文说明](README.zh-CN.md)
+
+</div>
+
+<br>
+
+| **3.40 M** | **3.24 M** | **3.7×** | **~80%** |
+|:---:|:---:|:---:|:---:|
+| entries from five open sources, in one 1,260 MB SQLite file | of them ranked down by one rule: no frequency rank, no Collins rating, no syllabus tag, no WordNet entry | real time for the shipped captioning settings, on my hardware | of a caption's delay is the speaker's pause; translation is 5% |
 
 The interesting parts are the constraints. 1,260 MB of merged corpora searched through
 SQLite FTS5, with a rule that demotes 3.24 M of the 3.40 M rows — everything carrying no
@@ -86,7 +112,7 @@ Getting it usable took three changes:
 | | conditions |
 |---|---|
 | 0.58× → 4.00× | 5-second chunks, ONNX Whisper against a resident `whisper.cpp` server, my hardware |
-| 0.8% WER | one 127-word lecture clip of my own, scored by `scratchpad/asr-quality.mjs`, `small` + beam-5 + domain prompt |
+| 0.8% WER | one 127-word clip synthesized from a lecture script, so there is a reference to score against — cleaner than a classroom; `small` + beam-5 + domain prompt |
 
 The shipped default is that last configuration, and it runs at **3.7×**, not 4.0× — beam
 search and prompting buy accuracy with throughput. The 4.00× is what the runtime change
@@ -279,7 +305,7 @@ Requires Node 22+ (for `node:sqlite`) and Windows for the desktop app.
 npm install
 npm run data              # ~800 MB of corpora → data/dict.db (1,260 MB)
 npm start                 # dictionary only at this point
-npm test                  # 188 tests, no data needed
+npm test                  # 270 tests; without data/dict.db, 186 run and the rest skip
 ```
 
 The dictionary works after that. **Captioning and translation are separate downloads**,

@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lexica</title>
+<meta name="description" content="An English–Chinese dictionary of 3.4 million entries and a real-time lecture captioner that both run with the network cable pulled out, on Windows and Android from one source tree.">
+<meta property="og:title" content="Lexica">
+<meta property="og:description" content="recieve still resolves. It just ranks below receive. An offline dictionary and lecture captioner, measured.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://liu-x27.github.io/lexica/">
+<meta property="og:image" content="https://liu-x27.github.io/lexica/brand/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400..600;1,8..60,400..600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+  // The app has two themes, paper and glass; so does this page. It follows the system until you pick one.
+  (function () {
+    var root = document.documentElement, KEY = 'lexica-site-theme';
+    try { var s = localStorage.getItem(KEY); if (s === 'light' || s === 'dark') root.dataset.theme = s; } catch (e) {}
+    function current() {
+      return root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+      var b = document.getElementById('theme');
+      function label() {
+        var dark = current() === 'dark';
+        b.querySelector('span').textContent = dark ? 'Glass' : 'Paper';
+        b.setAttribute('aria-label', 'Theme: ' + (dark ? 'glass' : 'paper') + '. Switch to ' + (dark ? 'paper' : 'glass'));
+      }
+      label();
+      b.addEventListener('click', function () {
+        var next = current() === 'dark' ? 'light' : 'dark';
+        root.dataset.theme = next;
+        try { localStorage.setItem(KEY, next); } catch (e) {}
+        label();
+      });
+      matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label);
+    });
+  })();
+</script>
+<style>
+  /* Paper and glass: the app's own tokens, from src/renderer/css/tokens.css */
+  :root {
+    --bg: #faf7f1;
+    --tint: #f4efe5;
+    --panel: #fffdf9;
+    --text: #1c1a17;
+    --dim: #5a534a;
+    --faint: #8d8479;
+    --line: #e5ddcd;
+    --line-strong: #d3c9b5;
+    --accent: #b3402f;
+    --accent-soft: #f6e6e1;
+    --link: #2f5468;
+    --hl: #fbeec4;
+    --hl-ink: #6b4d0a;
+    --code-bg: #1c1a17;
+    --code-text: #f4efe5;
+    --bar-2: #2f5468;
+    --bar-3: #c9992e;
+    --shadow: 0 2px 6px rgba(60, 48, 30, 0.07), 0 24px 48px -24px rgba(60, 48, 30, 0.22);
+    --zh: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    --serif: "Source Serif 4", Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+    --sans: "Inter", "Segoe UI", system-ui, var(--zh);
+    --mono: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a0d12;
+      --tint: #0e1219;
+      --panel: #10151d;
+      --text: #e3e9f2;
+      --dim: #9aa7ba;
+      --faint: #6b7789;
+      --line: rgba(255, 255, 255, 0.085);
+      --line-strong: rgba(255, 255, 255, 0.16);
+      --accent: #6ee7d4;
+      --accent-soft: rgba(110, 231, 212, 0.13);
+      --link: #93b4ff;
+      --hl: rgba(255, 214, 102, 0.17);
+      --hl-ink: #ffd977;
+      --code-bg: #05070a;
+      --code-text: #e3e9f2;
+      --bar-2: #93b4ff;
+      --bar-3: #ffd977;
+      --shadow: 0 12px 48px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0d12;
+    --tint: #0e1219;
+    --panel: #10151d;
+    --text: #e3e9f2;
+    --dim: #9aa7ba;
+    --faint: #6b7789;
+    --line: rgba(255, 255, 255, 0.085);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --accent: #6ee7d4;
+    --accent-soft: rgba(110, 231, 212, 0.13);
+    --link: #93b4ff;
+    --hl: rgba(255, 214, 102, 0.17);
+    --hl-ink: #ffd977;
+    --code-bg: #05070a;
+    --code-text: #e3e9f2;
+    --bar-2: #93b4ff;
+    --bar-3: #ffd977;
+    --shadow: 0 12px 48px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+    color-scheme: dark;
+  }
+
+  /* what shows in which theme */
+  .only-dark { display: none !important; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .only-dark { display: block !important; }
+    :root:not([data-theme="light"]) span.only-dark { display: inline !important; }
+    :root:not([data-theme="light"]) .only-light { display: none !important; }
+  }
+  :root[data-theme="dark"] .only-dark { display: block !important; }
+  :root[data-theme="dark"] span.only-dark { display: inline !important; }
+  :root[data-theme="dark"] .only-light { display: none !important; }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    transition: background-color 0.2s, color 0.2s;
+  }
+  a { color: inherit; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--accent); }
+  code, pre { font-family: var(--mono); font-size: 0.86em; }
+  :not(pre) > code {
+    padding: 0.08em 0.36em;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+    white-space: nowrap;
+  }
+  .zh { font-family: var(--zh); }
+  img { max-width: 100%; height: auto; display: block; }
+  @media (max-width: 640px) { :not(pre) > code { white-space: normal; overflow-wrap: anywhere; } }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  @media (max-width: 640px) { .wrap { padding: 0 16px; } }
+
+  /* masthead */
+  .masthead {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 20px 0 14px;
+    border-bottom: 1px solid var(--line-strong);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .brand .mark { width: 30px; height: 30px; flex: none; }
+  .brand span { font: 500 25px/1 var(--serif); letter-spacing: -0.01em; }
+  .masthead nav { display: flex; align-items: center; gap: 20px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .masthead nav a { text-decoration: none; color: var(--dim); }
+  .masthead nav a:hover { color: var(--text); }
+  @media (max-width: 760px) { .masthead nav a:not(.gh) { display: none; } }
+  #theme {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 11px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line-strong); background: var(--panel); color: var(--dim);
+    font: 500 12px/1 var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  #theme:hover { color: var(--text); border-color: var(--accent); }
+  #theme i { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); display: inline-block; }
+
+  /* hero */
+  .hero { padding: 72px 0 40px; display: grid; gap: 28px; }
+  .eyebrow { font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+  .hero h1 {
+    margin: 0;
+    font: 400 clamp(42px, 7vw, 86px)/1.04 var(--serif);
+    letter-spacing: -0.024em;
+    max-width: 17ch;
+  }
+  .hero h1 code {
+    font: italic 400 0.94em var(--serif);
+    border: 0; background: none; padding: 0;
+    white-space: nowrap; overflow-wrap: normal;
+  }
+  .hero h1 .typo {
+    text-decoration: underline wavy var(--accent);
+    text-decoration-thickness: 0.045em;
+    text-underline-offset: 0.16em;
+    text-decoration-skip-ink: none;
+  }
+  .lede { max-width: 64ch; font-size: 19px; color: var(--dim); margin: 0; }
+  .lede strong { color: var(--text); font-weight: 600; }
+  .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 18px; border-radius: 999px;
+    font-size: 15px; font-weight: 500; text-decoration: none;
+    border: 1px solid var(--line-strong);
+  }
+  .btn.primary { background: var(--accent); color: #fff8f6; border-color: var(--accent); }
+  :root[data-theme="dark"] .btn.primary { color: #04211c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.primary { color: #04211c; } }
+  .btn:hover { border-color: var(--accent); }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+  .badges span {
+    font: 12px/1 var(--mono); padding: 6px 9px;
+    border: 1px solid var(--line); border-radius: 999px; color: var(--dim);
+  }
+
+  /* window frame around a screenshot */
+  .window {
+    border: 1px solid var(--line-strong); border-radius: 12px; overflow: hidden;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+  }
+  .window-bar {
+    display: flex; align-items: center; gap: 7px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    font: 12px/1 var(--mono); color: var(--faint);
+  }
+  .window-bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); display: inline-block; }
+  .window-bar i:first-child { background: var(--accent); }
+  .window-bar span { margin-left: 8px; }
+  .caption { font-size: 14px; color: var(--faint); margin: 12px 2px 0; max-width: 82ch; }
+
+  /* sections */
+  section { padding: 72px 0; border-top: 1px solid var(--line); }
+  .kicker { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+  .kicker b { font: 500 13px/1 var(--mono); color: var(--accent); }
+  .kicker span { font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+  h2 {
+    margin: 0 0 18px;
+    font: 400 clamp(32px, 4.4vw, 50px)/1.1 var(--serif);
+    letter-spacing: -0.015em; max-width: 22ch;
+  }
+  .prose { max-width: 66ch; color: var(--dim); font-size: 17px; }
+  .prose p { margin: 0 0 14px; }
+  .prose strong { color: var(--text); font-weight: 600; }
+
+  .grid { display: grid; gap: 16px; }
+  .grid > * { min-width: 0; }
+  .g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .g3, .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 600px) { .g2, .g3, .g4 { grid-template-columns: 1fr; } }
+
+  .card {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+    padding: 20px;
+  }
+  .card h3 { margin: 0 0 6px; font: 600 16px/1.3 var(--sans); }
+  .card p { margin: 0; color: var(--dim); font-size: 15px; }
+  .card .tag { font: 12px/1 var(--mono); color: var(--faint); margin-bottom: 12px; display: block; }
+  .card strong { color: var(--text); font-weight: 600; }
+
+  /* the four signals */
+  .signal { border-top: 2px solid var(--text); padding-top: 14px; }
+  .signal b { font: 600 15px/1.3 var(--sans); }
+  .signal p { margin: 6px 0 0; color: var(--dim); font-size: 15px; }
+  .rule-line {
+    margin-top: 28px; padding: 16px 20px; border-left: 3px solid var(--accent);
+    background: var(--panel); color: var(--dim); max-width: 80ch;
+  }
+  .rule-line strong { color: var(--text); }
+
+  /* numbers */
+  .stat { border-top: 1px solid var(--line-strong); padding-top: 16px; }
+  .stat .n { font: 400 clamp(44px, 5.6vw, 68px)/1 var(--serif); letter-spacing: -0.02em; }
+  .stat .n small { font-size: 0.42em; color: var(--dim); margin-left: 2px; }
+  .stat .n.red { color: var(--accent); }
+  .stat p { margin: 10px 0 0; color: var(--dim); font-size: 15px; }
+  .fineprint { margin-top: 26px; font-size: 14px; color: var(--faint); max-width: 82ch; }
+
+  /* where a caption's delay goes */
+  .lat { display: flex; height: 54px; border-radius: 8px; overflow: hidden; margin-top: 30px; border: 1px solid var(--line); }
+  .lat div { display: flex; align-items: center; padding: 0 14px; font: 500 14px/1 var(--mono); white-space: nowrap; overflow: hidden; }
+  .lat .pause { flex: 80; background: var(--accent); color: #fff8f6; }
+  :root[data-theme="dark"] .lat .pause { color: #04211c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .lat .pause { color: #04211c; } }
+  .lat .rec { flex: 15; background: var(--bar-2); color: var(--bg); }
+  .lat .mt { flex: 5; background: var(--bar-3); padding: 0; }
+  .lat-key { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 14px; }
+  .lat-key div { border-top: 3px solid var(--line-strong); padding-top: 10px; font-size: 14px; color: var(--dim); }
+  .lat-key b { display: block; font: 400 30px/1.1 var(--serif); color: var(--text); margin-bottom: 4px; }
+  .lat-key .k1 { border-color: var(--accent); }
+  .lat-key .k2 { border-color: var(--bar-2); }
+  .lat-key .k3 { border-color: var(--bar-3); }
+  @media (max-width: 700px) { .lat-key { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  /* ledger of what read as working */
+  .ledger { list-style: none; margin: 28px 0 0; padding: 0; border-top: 1px solid var(--line-strong); }
+  .ledger li {
+    display: grid; grid-template-columns: 3.2rem minmax(0, 1fr) minmax(0, 1.3fr); gap: 20px;
+    padding: 16px 0; border-bottom: 1px solid var(--line);
+  }
+  .ledger .no { font: 500 13px/1.6 var(--mono); color: var(--accent); }
+  .ledger .what { font-weight: 500; }
+  .ledger .how { color: var(--dim); font-size: 15px; }
+  @media (max-width: 700px) {
+    .ledger li { grid-template-columns: 2.4rem minmax(0, 1fr); }
+    .ledger .how { grid-column: 2; }
+  }
+
+  /* platforms table */
+  table.plat { width: 100%; border-collapse: collapse; font-size: 15px; margin-top: 26px; }
+  table.plat th, table.plat td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); }
+  table.plat th { font: 500 12px/1.3 var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
+  table.plat td:not(:first-child), table.plat th:not(:first-child) { text-align: center; width: 8.5rem; font-family: var(--mono); }
+  table.plat td.y { color: var(--accent); }
+  table.plat td.n { color: var(--faint); }
+  table.plat .why { display: block; margin-top: 2px; font-size: 13px; color: var(--faint); }
+
+  /* gallery */
+  .shot { margin: 0; }
+  .shot .frame { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); aspect-ratio: 1830 / 1230; }
+  .shot .frame img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+  .shot figcaption { margin-top: 10px; font-size: 14px; color: var(--dim); }
+  .shot figcaption b { color: var(--text); font-weight: 600; }
+
+  pre.term {
+    margin: 0; padding: 18px 20px; overflow-x: auto;
+    background: var(--code-bg); color: var(--code-text);
+    border-radius: 8px; font-size: 13px; line-height: 1.75;
+  }
+  .shot pre.term { white-space: pre-wrap; overflow-wrap: anywhere; }
+  pre.term .p { color: #8d8479; }
+  pre.term .g { color: #6ee7d4; }
+  pre.term, pre.term * { font-family: var(--mono), var(--zh); }
+
+  footer { padding: 40px 0 64px; border-top: 1px solid var(--line-strong); color: var(--faint); font-size: 14px; }
+  footer .row { display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <a class="brand" href="#top" aria-label="Lexica home"><svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="112.64" fill="#b3402f"/><path fill="#fdf6f2" d="M146.63 381.44V362.83L188.75 360.61H193.29V381.44ZM175.01 381.44Q175.33 365.25 175.33 349.05Q175.33 332.86 175.33 317.04Q175.33 301.21 175.33 285.65V267.58Q175.33 251.35 175.33 235.13Q175.33 218.9 175.33 202.76Q175.33 186.62 175.01 170.64H219.13Q219.13 186.62 218.97 202.81Q218.82 219.01 218.82 235.15Q218.82 251.28 218.82 267.58V287.04Q218.82 301.86 218.82 317.52Q218.82 333.19 218.97 349.17Q219.13 365.15 219.13 381.44ZM197.9 381.44V362.19H299.01L286.09 373.41L298.05 317.54H320.14L317.28 381.44ZM146.63 188.93V170.64H250.58V188.93L205.71 191.47H188.75Z"/><circle fill="#fdf6f2" cx="396.8" cy="358.4" r="38.4"/></svg><span>Lexica</span></a>
+    <nav aria-label="Sections">
+      <a href="#dictionary">Dictionary</a>
+      <a href="#captions">Captions</a>
+      <a href="#found">What it got wrong</a>
+      <a href="#platforms">Android</a>
+      <a href="#start">Start</a>
+      <a class="gh" href="https://github.com/liu-x27/lexica">GitHub ↗</a>
+      <button id="theme" type="button"><i aria-hidden="true"></i><span>Paper</span></button>
+    </nav>
+  </header>
+
+  <main id="top">
+    <div class="hero">
+      <div class="eyebrow">An offline English–Chinese dictionary and lecture captioner · Windows and Android</div>
+      <h1><code class="typo">recieve</code> still resolves. It just ranks below <code>receive</code>.</h1>
+      <p class="lede">
+        Lexica is an English–Chinese dictionary of 3.4 million entries and a real-time lecture captioner,
+        and both work with the network cable pulled out. Most of those entries are noise from the web
+        corpora they came from, so one rule, not a model, ranks the <strong>3.24 million that no source
+        vouches for</strong> below the 162 thousand that at least one does. A typo still resolves, and says
+        it is probably a typo. The captioner writes a lecture down in English with a Chinese gloss under
+        each line, at <strong>3.7× real time</strong>, and by default sends nothing anywhere.
+      </p>
+      <div class="ctas">
+        <a class="btn primary" href="https://github.com/liu-x27/lexica">View on GitHub</a>
+        <a class="btn" href="#start">Quick start</a>
+        <a class="btn zh" href="https://github.com/liu-x27/lexica/blob/main/README.zh-CN.md">中文说明</a>
+      </div>
+      <div class="badges" aria-label="Built with">
+        <span>Electron</span><span>node:sqlite · FTS5</span><span>whisper.cpp</span>
+        <span>opus-mt / NLLB on ONNX</span><span>Android · Kotlin bridge</span><span>no native modules</span><span>270 tests</span>
+      </div>
+
+      <div>
+        <div class="window">
+          <div class="window-bar"><i></i><i></i><i></i><span class="only-light">Lexica — paper theme</span><span class="only-dark">Lexica — glass theme</span></div>
+          <img class="only-light" src="screenshots/entry.png" width="1848" height="1248" alt="The entry for run in the paper theme: senses grouped by part of speech, inflections, WordNet glosses with examples, and frequency ranks on the right.">
+          <img class="only-dark" src="screenshots/entry-glass.png" width="1830" height="1230" alt="The entry for ephemeral in the glass theme: syllabus tags, inflections, a WordNet gloss with synonyms and examples, and frequency ranks on the right.">
+        </div>
+        <p class="caption">
+          <span class="only-light"><code>run</code> in the paper theme: senses grouped by part of speech, its inflections,
+          WordNet glosses with their examples, and on the right its rank in the COCA and BNC frequency lists,
+          its syllabus tags and what each source contributed.</span><span class="only-dark"><code>ephemeral</code> in
+          the glass theme: IELTS, TOEFL and GRE tags, a WordNet gloss with its synonyms and examples, and rank
+          #14,116 in COCA.</span> The app’s own screenshots; the switch at the top right swaps the theme here too.
+        </p>
+      </div>
+    </div>
+
+    <section id="dictionary">
+      <div class="kicker"><b>01</b><span>The dictionary</span></div>
+      <h2>Most of a merged dictionary is noise. One rule ranks it down.</h2>
+      <div class="prose">
+        <p>
+          Five open sources merge into one SQLite file. ECDICT gives the Chinese senses, phonetics,
+          inflections, frequency ranks and exam tags; WordNet 3.1 the English senses, examples and the
+          synonym network; Tatoeba 214,448 example sentences, 28,909 of them with a Chinese translation;
+          GCIDE, Webster’s 1913, 49,630 etymologies and 34,677 classical quotations; and Chinese
+          Wikipedia’s cross-language titles 918,588 English–Chinese term pairs.
+        </p>
+        <p>
+          ECDICT was aggregated from the web, and it shows. <code>recieve</code> and <code>wierd</code> are
+          first-class entries, and so are bare inflections like <code>ran</code> and <code>mice</code>. Searched
+          naively, a common word comes back under a page of near-duplicates. Four signals say a row is a
+          real word:
+        </p>
+      </div>
+      <div class="grid g4" style="margin-top: 28px">
+        <div class="signal"><b>A frequency rank</b><p>in the COCA or BNC lists.</p></div>
+        <div class="signal"><b>A Collins rating</b><p>one to five stars.</p></div>
+        <div class="signal"><b>A syllabus tag</b><p><span class="zh">中考</span> through GRE, or the Oxford 3000.</p></div>
+        <div class="signal"><b>A WordNet entry</b><p>any sense at all.</p></div>
+      </div>
+      <p class="rule-line">
+        A row with none of the four is <strong>weak</strong>. Weak rows are not deleted: exact lookup still
+        finds them and says the word is probably misspelled. Search ranking and the spell-correction pool
+        order on the flag rather than filter on it, so a weak row sits below the vouched-for ones, which is
+        not the same as below every real word: a real word no source rated is weak too.
+      </p>
+
+      <div class="grid g4" style="margin-top: 40px">
+        <div class="stat"><div class="n">3.40<small>M</small></div><p>entries: 1.36 million single words and 2.04 million phrases.</p></div>
+        <div class="stat"><div class="n red">3.24<small>M</small></div><p>of them weak, which is where <code>recieve</code> and <code>wierd</code> land.</p></div>
+        <div class="stat"><div class="n">162<small>K</small></div><p>vouched for by at least one source, and ranked first.</p></div>
+        <div class="stat"><div class="n">1,260<small>MB</small></div><p>one SQLite file, read through Node’s built-in <code>node:sqlite</code>.</p></div>
+      </div>
+
+      <div class="grid g2" style="margin-top: 40px">
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/weak-entry-demoted.png" width="1848" height="1248" alt="The entry for recieve: it resolves, flagged as a probable misspelling, with no frequency, syllabus or WordNet record." loading="lazy"></div>
+          <figcaption><b>Weak.</b> <code>recieve</code> is a real ECDICT row with all four signals absent. It resolves, and says why it is unlikely to be what you meant.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/strong-entry-ranked.png" width="1848" height="1248" alt="children redirects to child, which carries frequency rank 114, four syllabus tags and five Collins stars." loading="lazy"></div>
+          <figcaption><b>Vouched for.</b> <code>children</code> redirects to <code>child</code>: #114 in the combined list, four syllabus tags, five Collins stars. Same lookup path, the other side of the rule.</figcaption>
+        </figure>
+      </div>
+      <p class="fineprint">
+        Counted from the built database. No native modules: SQLite is Node’s own <code>node:sqlite</code>, not
+        better-sqlite3, and FTS5, the trigram tokenizer and custom functions all work through it, so the app
+        installs on a machine with no MSVC build tools, which is why it was chosen.
+      </p>
+    </section>
+
+    <section id="captions">
+      <div class="kicker"><b>02</b><span>Lecture captions</span></div>
+      <h2>Most of a caption’s delay is the speaker’s pause.</h2>
+      <div class="prose">
+        <p>
+          Live captions for a lecture, from the microphone, from system audio or from a recording, written to
+          a transcript as they go. The English line is what the system is judged on. The Chinese under it comes
+          from a local <code>opus-mt</code> model and is a gloss: good enough to follow along, wrong often
+          enough that the transcript keeps both languages.
+        </p>
+        <p>
+          Throughput said nothing about how far behind a caption appears, so each stage was timed, over
+          13 chunks of one clip:
+        </p>
+      </div>
+      <div class="lat" role="img" aria-label="Where a caption's delay goes: about 80% waiting for the speaker to pause, about 15% recognition, about 5% translation, and no queueing.">
+        <div class="pause">~80% · waiting for the pause</div>
+        <div class="rec">~15%</div>
+        <div class="mt"></div>
+      </div>
+      <div class="lat-key">
+        <div class="k1"><b>4.8 s</b>median wait for the speaker to pause, 3.2–7.7 s</div>
+        <div class="k2"><b>920 ms</b>median recognition, <code>small</code> with beam search</div>
+        <div class="k3"><b>300 ms</b>median translation by the local model, about 5%</div>
+        <div><b>0 ms</b>queueing; nothing ever backed up</div>
+      </div>
+      <div class="prose" style="margin-top: 30px">
+        <p>
+          A faster translator cannot fix this. So captions go out twice: a second <code>whisper.cpp</code>
+          server, a smaller model held to four threads, transcribes the uncut buffer every 1.5 seconds and
+          shows a <strong>provisional line</strong>, 212–352 ms a pass, which the accurate pass replaces when the
+          speaker pauses. Provisional text is never written to the transcript; the self-test checks the
+          journal’s segment count against the finished count.
+        </p>
+      </div>
+      <div style="margin-top: 26px">
+        <div class="window">
+          <div class="window-bar"><i></i><i></i><i></i><span>Lexica — live captions, recorded by the self-test</span></div>
+          <img src="screenshots/captions.gif" width="1000" height="686" alt="Rolling captions: an italic provisional line is replaced by the accurate pass; the glossary corrects terms in the finished lines." loading="lazy">
+        </div>
+        <p class="caption">
+          The italic line marked <code>···</code> is provisional, <em>Over many episodes it learned.</em>, and a few
+          frames later the accurate pass replaces it with the whole sentence. With eight glossary terms set up
+          for this lecture the finished lines read <span class="zh">强化学习, 智能体观察了状态, 经验回放缓冲</span>;
+          the same audio without a glossary came out as <span class="zh">加强学习, 特工观察了国家, 重播缓冲</span>.
+          Synthetic speech fed at 4× and captured every 450 ms, so this shows the pipeline, not real-time pacing.
+        </p>
+      </div>
+
+      <div class="grid g3" style="margin-top: 40px">
+        <div class="card"><span class="tag">src/main/asr.js</span><h3>A resident whisper.cpp server</h3><p>ONNX Whisper ran 5-second chunks at 0.58× real time, behind the speaker for good. A warm <code>whisper.cpp</code> process ran them at 1.50×.</p></div>
+        <div class="card"><span class="tag">--audio-ctx</span><h3>The encoder window, bounded</h3><p>Whisper encodes 30 s even for 5. Shrinking the window took 1.50× to <strong>4.00×</strong> with the text unchanged. Too small, and it loops; so it is derived from the chunk limit.</p></div>
+        <div class="card"><span class="tag">small · beam 5 · prompt</span><h3>The shipped default</h3><p><strong>0.8% WER</strong> at 3.7×, where <code>base</code> greedy scored 4.7%. Beam search made <code>base</code> worse, 6.3%, so beam is set per model.</p></div>
+      </div>
+      <p class="fineprint">
+        Neither number is a benchmark. The speeds are this machine, 5-second chunks; the WER is one 127-word
+        clip synthesized from a lecture script so there is a reference to score against, cleaner than a
+        classroom. Throughput is not latency: 3.7× says audio is processed faster than it arrives. Splitting
+        is on pauses, with a threshold that follows the room’s noise floor, never on a fixed clock that cuts
+        sentences in half. The full table is in the
+        <a href="https://github.com/liu-x27/lexica/blob/main/README.zh-CN.md#识别质量三个可调项的实测">Chinese README</a>.
+      </p>
+    </section>
+
+    <section id="found">
+      <div class="kicker"><b>03</b><span>What it got wrong</span></div>
+      <h2>The failures that read as working.</h2>
+      <div class="prose">
+        <p>
+          Almost nothing that went wrong here raised an error. The output still looked like an entry, a
+          caption, a screenshot or a sentence of Chinese. Each of these was found by reading the output.
+        </p>
+      </div>
+      <ol class="ledger">
+        <li><span class="no">01</span><span class="what">A common word, under a page of misspellings</span><span class="how">ECDICT ships <code>recieve</code> and <code>wierd</code> as entries. The weak flag now ranks them below every vouched-for row, and spell correction draws its candidates only from those.</span></li>
+        <li><span class="no">02</span><span class="what">Whisper repeating one sentence forever</span><span class="how"><code>--audio-ctx 512</code> covers about 10.5 s. Fed 14 s, the decoder did not drop the tail; it looped, with no error. The window is now computed from the chunk limit.</span></li>
+        <li><span class="no">03</span><span class="what"><code>63.8</code> became <code>638</code></span><span class="how">The local translator dropped a decimal point: <span class="zh">从 71.2 降低至 638</span>. That is why there is no translation-only layout: every sentence sits beside its English.</span></li>
+        <li><span class="no">04</span><span class="what">A 429 that was not rate limiting</span><span class="how">Electron’s main-process <code>fetch</code> got 429 where <code>net.fetch</code> got 200 for the same URL. The check passed anyway: the fallback model happened to be right. It now asserts which channel answered.</span></li>
+        <li><span class="no">05</span><span class="what"><span class="zh">反向传播反向传播</span></span><span class="how">A glossary rendering occurred twice where the English had the term once, and both were replaced. A rendering that occurs more often than its term is now left alone.</span></li>
+        <li><span class="no">06</span><span class="what">“Q-learning is on-policy”</span><span class="how"><code>on-policy</code> and <code>policy</code> both probed as <span class="zh">政策</span>, and pinning a vague <span class="zh">政策性的</span> on <code>on-policy</code> made a true sentence false. A shared rendering now goes to the most general term.</span></li>
+        <li><span class="no">07</span><span class="what">Screenshots one step behind</span><span class="how"><code>capturePage()</code> returns the last frame presented, and a covered window stops presenting. Minimized, 7–8 of 12 captures were stale and only 2–5 matched the one before byte for byte. Each capture now waits on two animation frames, or is not saved.</span></li>
+        <li><span class="no">08</span><span class="what">The Android copy drifted</span><span class="how">Android held a hand copy of the business layer: its word lists had no drill scope and its export lacked four columns. Both now load <code>app-core.js</code>, and a test checks its channels against the preload.</span></li>
+      </ol>
+    </section>
+
+    <section id="platforms">
+      <div class="kicker"><b>04</b><span>Two platforms</span></div>
+      <h2>One source tree, and what Android leaves out on purpose.</h2>
+      <div class="prose">
+        <p>
+          The Android build reuses the desktop renderer verbatim; <code>npm run build:www</code> assembles it
+          from <code>src/renderer</code>, and a test asserts the shared files are <strong>byte-identical</strong>,
+          so the copy cannot drift silently. What differs is bridged, and what would only pretend to work is
+          left out.
+        </p>
+      </div>
+      <table class="plat">
+        <thead><tr><th>feature</th><th>Windows</th><th>Android</th></tr></thead>
+        <tbody>
+          <tr><td>Search, entries, wordbook, notes, lists</td><td class="y">yes</td><td class="y">yes</td></tr>
+          <tr><td>Drills and level tests</td><td class="y">yes</td><td class="y">yes</td></tr>
+          <tr><td>Sentence translation, online, opt-in</td><td class="y">yes</td><td class="y">yes</td></tr>
+          <tr><td>Sentence translation, local model<span class="why">the model is ~90 MB, and WASM on a phone is slow</span></td><td class="y">yes</td><td class="n">—</td></tr>
+          <tr><td>Glossary<span class="why">its probing lives in the desktop main process</span></td><td class="y">yes</td><td class="n">—</td></tr>
+          <tr><td>Live lecture captions<span class="why">the audio stack is left out of the bundle, not stubbed</span></td><td class="y">yes</td><td class="n">—</td></tr>
+          <tr><td>Floating quick-lookup window</td><td class="y">yes</td><td class="n">—</td></tr>
+        </tbody>
+      </table>
+      <div class="grid g4" style="margin-top: 32px">
+        <div class="card"><span class="tag">app-core.js</span><h3>One business layer</h3><p>Lookup, wordbook, drills and lists: on IPC channels on the desktop, spread into <code>window.lexica</code> on Android.</p></div>
+        <div class="card"><span class="tag">cjs-runtime.js</span><h3>A small CommonJS loader</h3><p>The shared modules are CommonJS, and a WebView is not Node.</p></div>
+        <div class="card"><span class="tag">android-sqlite.js</span><h3>node:sqlite, in Kotlin</h3><p>A shim shaped like <code>node:sqlite</code> over a Kotlin <code>SqlBridge</code>, on a 383 MB slim database.</p></div>
+        <div class="card"><span class="tag">CSP</span><h3>One named host</h3><p><code>connect-src 'none'</code> would have failed silently on a phone while every sandbox test passed. It names the one translation host, and a test ties it to the code.</p></div>
+      </div>
+      <p class="rule-line">
+        The bridge detail that cost the most time: <code>SQLiteDatabase.execSQL()</code> refuses any statement that
+        returns rows, several PRAGMAs do in their assignment form, and the error never mentions PRAGMA.
+        <a href="https://github.com/liu-x27/lexica/blob/main/docs/android-port.md">The note</a> came out of its first launch on a real phone.
+      </p>
+    </section>
+
+    <section id="inside">
+      <div class="kicker"><b>05</b><span>What’s inside</span></div>
+      <h2>A dictionary is mostly ranking.</h2>
+      <div class="grid g3" style="margin-top: 8px">
+        <div class="card"><span class="tag">src/main/dict-db.js</span><h3>Lookup, in order</h3><p>Exact headword, then lemma (<code>running</code> → <code>run</code>), then hyphens and spaces normalized, then spelling: soundex, same-length neighbours and trigrams for candidates, Damerau–Levenshtein to rank them, so <code>recieve</code> is one edit from <code>receive</code>.</p></div>
+        <div class="card"><span class="tag">zh_seg · fts_zh</span><h3>Chinese to English</h3><p>An exact sense segment from 4.41 million, then a prefix, then a substring, ranked by how much of the sense the query covers. Ranked by frequency, <code>ferric</code> buries the answer to <span class="zh">高铁</span>.</p></div>
+        <div class="card"><span class="tag">Wikipedia langlinks</span><h3>Terms someone checked</h3><p>918,588 pairs from Chinese Wikipedia’s cross-language titles, converted to simplified with OpenCC. Phrases have no frequency rank; an article is what puts <code>gradient descent</code> above <code>gradient gun</code>.</p></div>
+        <div class="card"><span class="tag">selection-helper.ps1</span><h3>Look up a selection anywhere</h3><p>A resident PowerShell helper reads the selection through UI Automation, without the clipboard, and falls back to Ctrl+C with the clipboard backed up by value.</p></div>
+        <div class="card"><span class="tag">src/main/lecture.js</span><h3>A lecture survives a crash</h3><p>Every line is appended synchronously to <code>journal.jsonl</code>, whatever formats were chosen, and md, txt, srt and json are rebuilt from it.</p></div>
+        <div class="card"><span class="tag">src/main/quiz.js</span><h3>Drills from the dictionary</h3><p>14 scopes, from <span class="zh">中考</span> to GRE and the Collins bands, and 8 question types, computed, not stored. Distractors come from the same scope at a similar frequency, minus the answer’s synonyms.</p></div>
+      </div>
+    </section>
+
+    <section id="gallery">
+      <div class="kicker"><b>06</b><span>Gallery</span></div>
+      <h2>Every picture is from a real run.</h2>
+      <div class="prose">
+        <p>
+          Taken by <code>npm run shot</code>, the app’s own screenshot pass: it walks the interface in both
+          themes and checks what a picture cannot show, such as whether the page still scrolls and whether
+          the glossary changed what it should and nothing else.
+        </p>
+      </div>
+      <div class="grid g2" style="margin-top: 20px">
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/confusables.png" width="1830" height="1230" alt="The entry for principal: Tatoeba examples with Chinese, the confusable word principle, an etymology from Webster's 1913 and a quotation from Proverbs." loading="lazy"></div>
+          <figcaption><b>Five sources, one entry.</b> <code>principal</code>: Tatoeba’s bilingual examples, its confusable <code>principle</code>, the etymology from Webster’s 1913, and a quotation from Proverbs.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/sentence.png" width="1830" height="1230" alt="A sentence typed into the search box: dictionary terms first, then the local model's translation beside the English." loading="lazy"></div>
+          <figcaption><b>A whole sentence.</b> The dictionary’s terms come first, because they can be trusted; the model’s translation sits beside its English, labelled as unreliable on terms and numbers.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/quick-sentence.png" width="870" height="690" alt="The floating lookup window on a sentence: mitochondria, adenosine triphosphate and oxidative phosphorylation picked out, translation still running." loading="lazy"></div>
+          <figcaption><b>The floating window.</b> On a sentence: <code>mitochondria</code>, <code>adenosine triphosphate</code> and <code>oxidative phosphorylation</code> picked out of it while the translation is still running.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/glossary-packs.png" width="1830" height="1230" alt="The glossary after importing the systems pack: 25 terms added, the app asking the model how it mistranslates each." loading="lazy"></div>
+          <figcaption><b>Glossary packs.</b> Importing the systems pack adds 25 terms, and the app starts asking the model how it gets each one wrong, which is what a replacement needs to know.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/level-test.png" width="1830" height="1230" alt="A level test result: 3 of 30 right, about 10% of the TOEFL list, plus or minus 11%, with results per frequency band." loading="lazy"></div>
+          <figcaption><b>A level test.</b> 30 words drawn evenly from three frequency bands, reported with its 95% interval. These are the self-test’s answers, so 3 of 30.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img src="screenshots/live-captions.png" width="1848" height="1248" alt="Live captions: timestamped English lines from whisper.cpp, with Chinese under each." loading="lazy"></div>
+          <figcaption><b>A lecture, written down.</b> Timestamped English from <code>whisper.cpp</code>, the local model’s Chinese under each line. <code>replay buffer</code> came out as <span class="zh">重播缓冲</span>; the English stays.</figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="frame"><img class="only-light" src="screenshots/entry-glass.png" width="1830" height="1230" alt="The entry for ephemeral in the glass theme." loading="lazy"><img class="only-dark" src="screenshots/entry.png" width="1848" height="1248" alt="The entry for run in the paper theme." loading="lazy"></div>
+          <figcaption><b>The other theme.</b> <span class="only-light">Glass, for the dark: <code>ephemeral</code>, with its tags, synonyms and frequency.</span><span class="only-dark">Paper, for the light: <code>run</code>, with its inflections, senses and frequency.</span> Both are complete themes, not a filter over one.</figcaption>
+        </figure>
+        <figure class="shot">
+          <pre class="term"><span class="p">$</span> npm run shot
+[shot] <span class="g">✓</span> 滚动容器正常（#stage）
+[shot] <span class="g">✓</span> 翻译页双语对照 2 句
+[shot] <span class="g">✓</span> 译文里用上了术语表的译名：策略、经验回放缓冲
+[shot] <span class="g">✓</span> 对照组未被改动
+[shot] <span class="g">✓</span> 水平检测出结果：答对 3 / 30 · 10% · 3 个分层
+<span class="p">…</span>
+38 张，退出码 0
+
+<span class="p">$</span> npm test
+ℹ tests 270
+ℹ pass 270
+ℹ fail 0</pre>
+          <figcaption><b>The run that took them.</b> 38 frames, 17 checks, none failed. Among them: the glossary used its terms, and left alone the control sentence that mentions <span class="zh">政策</span> without <code>policy</code>.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="start">
+      <div class="kicker"><b>07</b><span>Quick start</span></div>
+      <h2>One download, then no network.</h2>
+      <div class="grid g2" style="margin-top: 8px">
+        <pre class="term"><span class="p">$</span> npm install
+<span class="p">$</span> npm run data    <span class="p"># ~800 MB of corpora → data/dict.db</span>
+<span class="p">$</span> npm start
+<span class="p">$</span> npm test        <span class="p"># 270; on a fresh clone, those that</span>
+                  <span class="p"># need data/dict.db skip</span>
+
+<span class="p"># captions and translation are separate downloads</span>
+<span class="p">$</span> npm run fetch:asr     <span class="p"># whisper.cpp + base model, ~90 MB</span>
+<span class="p">$</span> npm run fetch:model   <span class="p"># opus-mt-en-zh, 118 MB</span></pre>
+        <div class="prose">
+          <p><strong>Requirements.</strong> Node 22 or later, for <code>node:sqlite</code>, and Windows for the desktop app. No build tools.</p>
+          <p><strong>From China.</strong> The download script tries <code>gh-proxy.com</code> and <code>ghfast.top</code> before GitHub, then checks three slices of each mirrored file against GitHub byte for byte.</p>
+          <p><strong>A portable build.</strong> <code>npm run pack</code> gives <code>dist/Lexica-win-x64/</code>, no installer.</p>
+          <p><strong>Android.</strong> <code>npm run build:db:mobile</code> for the 383 MB slim database, then <code>npm run apk</code>.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="row">
+      <span>Lexica · by <a href="https://github.com/liu-x27">liu-x27</a> · dictionary data under its <a href="https://github.com/liu-x27/lexica/blob/main/README.zh-CN.md#数据来源">upstream licences</a></span>
+      <span>
+        <a href="https://github.com/liu-x27/lexica">Source</a> ·
+        <a href="https://github.com/liu-x27/lexica#readme">README</a> ·
+        <a class="zh" href="https://github.com/liu-x27/lexica/blob/main/README.zh-CN.md">中文说明</a>
+      </span>
+    </div>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,4 +1,19 @@
-# Lexica · Windows 离线英语词典
+<div align="center">
+
+<a href="https://liu-x27.github.io/lexica/">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.svg">
+  <img alt="Lexica" src="docs/brand/lockup-light.svg" width="300">
+</picture>
+</a>
+
+### Windows 离线英语词典 · 上课实时字幕
+
+**[项目主页](https://liu-x27.github.io/lexica/)** · [English](README.md) · [快速开始](#快速开始) · [实时字幕](#实时字幕上课听写) · [术语表](#术语表) · [测试](#测试)
+
+</div>
+
+<br>
 
 一个完全离线的桌面英语词典。数据只下载一次，之后不再联网。
 
