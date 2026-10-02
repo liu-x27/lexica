@@ -905,3 +905,8 @@ Chromium 就把页面当成 hidden、停掉出帧，抓到的是之前的画面�
 | `meta` | 构建时间与各项统计 |
 
 用户数据（生词本、复习进度、设置）单独存在 `%APPDATA%\lexica\user.db`，与只读词库分离。
+
+## 许可
+
+代码以 MIT 协议发布，见 [LICENSE](LICENSE)。`assets/fonts` 里的 Inter 与 Source Serif 4
+是 SIL OFL；词库数据在构建时下载，各自沿用上游协议，见上面的「[数据来源](#数据来源)」。

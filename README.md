@@ -18,6 +18,7 @@ both run with the network cable pulled out, on Windows and Android from one sour
 ![Android](https://img.shields.io/badge/Android-same_source_tree-1c1a17?style=flat-square&logo=android&logoColor=white)
 ![No native modules](https://img.shields.io/badge/native_modules-none-1c1a17?style=flat-square)
 ![Tests](https://img.shields.io/badge/tests-270-1c1a17?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/license-MIT-1c1a17?style=flat-square)](LICENSE)
 
 **[Project page](https://liu-x27.github.io/lexica/)** · [The dictionary](#the-dictionary) · [Captions](#real-time-captioning) · [Two platforms](#one-source-tree-two-platforms) · [Running it](#running-it) · [中文说明](README.zh-CN.md)
 
@@ -351,3 +352,10 @@ hardware and lecture recordings, not from a public benchmark.
 
 Dictionary data is redistributed under the licences of the upstream corpora; the
 build scripts fetch them rather than vendoring them here.
+
+## License
+
+The code is MIT — see [LICENSE](LICENSE). The two fonts in `assets/fonts`, Inter and
+Source Serif 4, are under the SIL Open Font License, and the dictionary data keeps the
+licences of its upstream sources, listed in the
+[Chinese README](README.zh-CN.md#数据来源).

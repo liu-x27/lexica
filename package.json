@@ -2,6 +2,7 @@
   "name": "lexica",
   "productName": "Lexica",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Lexica — 离线英语词典（ECDICT + WordNet + Tatoeba）",
   "main": "src/main/index.js",
   "private": true,
