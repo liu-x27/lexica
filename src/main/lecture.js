@@ -90,7 +90,11 @@ class LectureRecorder {
 
     const at = new Date();
     const s = stamp(at);
-    const name = `${s.date} ${s.time} ${safeName(title)}`;
+    /* 目录名只精确到分钟。同一分钟里同名的课再开一场（停了马上重开），不能落进同一个目录：
+       流水账是追加写的，会把两场混成一份，md/txt/srt 却是重新写的，前一场的成品就没了。 */
+    const base = `${s.date} ${s.time} ${safeName(title)}`;
+    let name = base;
+    for (let n = 2; fs.existsSync(path.join(this.root, name)); n++) name = `${base} (${n})`;
     const dir = path.join(this.root, name);
     await fsp.mkdir(dir, { recursive: true });
 

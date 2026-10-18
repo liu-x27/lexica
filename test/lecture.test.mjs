@@ -121,6 +121,21 @@ describe('课堂记录', () => {
     assert.deepEqual(Object.keys(t.segments[0]).sort(), ['en', 'id', 't0', 't1', 'zh']);
   });
 
+  test('同一分钟里同名的课再开一场，不能落进前一场的目录', async () => {
+    const a = await rec.start({ title: '重开', formats: ['md'] });
+    const id = rec.addSegment({ t0: 0, t1: 1000, en: 'First run.' });
+    rec.setTranslation(id, '第一场。');
+    await rec.stop();
+    const b = await rec.start({ title: '重开', formats: ['md'] });
+    await rec.stop();
+    assert.notEqual(a.dir, b.dir);
+    // 前一场的成品和流水账都还在、没被后一场改动
+    assert.match(read(a, 'md'), /First run\./);
+    const segs = fs.readFileSync(path.join(a.dir, 'journal.jsonl'), 'utf8').split('\n')
+      .filter((l) => l.includes('"kind":"head"'));
+    assert.equal(segs.length, 1, '流水账里只该有一场的抬头');
+  });
+
   test('翻译失败的条目要放行，不能把队列卡死', async () => {
     const info = await rec.start({ title: '失败', formats: ['txt'] });
     const a = rec.addSegment({ t0: 0, t1: 1000, en: 'Alpha.' });
