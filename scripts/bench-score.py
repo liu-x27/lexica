@@ -261,8 +261,9 @@ def score(args):
         "asr": first.get("asrModel"),
         "mt": first.get("mtModel"),
         "settings": first.get("settings"),
-        "wer": None if wer is None else round(wer, 4),
-        "wer_per_talk": {k: round(v, 4) for k, v in per_talk_wer.items()},
+        # 存全精度：先在这里舍到 4 位、表里再舍到 1 位，会舍错（0.205453 → 0.2055 → 20.6%）
+        "wer": wer,
+        "wer_per_talk": per_talk_wer,
         "omnisteval": omni,
         "pipeline": pipeline_stats(runs, first.get("mtModel")),
     }
@@ -287,8 +288,8 @@ def table(run_dirs):
             rows.append(json.load(f))
     get = lambda r, k: r["omnisteval"].get(k)  # noqa: E731
     fmt = lambda x, n=1: "—" if x is None else f"{x:.{n}f}"  # noqa: E731
-    print("| 配置 | WER | chrF | XCOMET-XL | LongYAAL CU / CA (s) | LongLAAL CU / CA (s) | 字幕落后 中位 / p90 (s) | 兜底句数 |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("| 配置 | WER | BLEU | chrF | XCOMET-XL | LongYAAL CU / CA (s) | LongLAAL CU / CA (s) | 中文晚到 中位 / p90 (s) | 兜底句数 |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         p = r["pipeline"]
         yaal = f"{fmt(get(r, 'LongYAAL (CU)') / 1000, 2)} / {fmt(get(r, 'LongYAAL (CA)') / 1000, 2)}"
@@ -296,7 +297,7 @@ def table(run_dirs):
         lag = f"{fmt(p['zh_lag_s']['median'], 2)} / {fmt(p['zh_lag_s']['p90'], 2)}"
         wer = "—" if r.get("wer") is None else f"{r['wer'] * 100:.1f}%"
         xc = "—" if r.get("xcomet_xl") is None else f"{r['xcomet_xl'] * 100:.1f}"
-        print(f"| {r['run']} | {wer} | {fmt(get(r, 'chrF'))} | {xc} | {yaal} | {laal} | {lag} | "
+        print(f"| {r['run']} | {wer} | {fmt(get(r, 'BLEU'))} | {fmt(get(r, 'chrF'))} | {xc} | {yaal} | {laal} | {lag} | "
               f"{p['fallback_segments']}/{p['segments']} |")
 
 
