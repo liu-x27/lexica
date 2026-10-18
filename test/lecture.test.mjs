@@ -93,6 +93,34 @@ describe('课堂记录', () => {
     assert.ok(md.indexOf('第一句。') < md.indexOf('第二句。'));
   });
 
+  /**
+   * 算字幕延迟要用：t0/t1 只说明这段音频在哪，说明不了识别和翻译花了多久。
+   * 停止时还没译完的条目不能写 zhAt——写成停止那一刻会被当成译文那时才到。
+   */
+  test('流水账记下英文和译文各自出炉的时刻，以及译文走的通道', async () => {
+    const info = await rec.start({ title: '时刻', formats: [] });
+    const before = Date.now();
+    const a = rec.addSegment({ t0: 0, t1: 2000, en: 'Alpha.' });
+    rec.addSegment({ t0: 2000, t1: 4000, en: 'Beta.' });
+    await new Promise((r) => setTimeout(r, 15));
+    rec.setTranslation(a, '阿尔法。', { mt: 'hymt7b' });
+    await rec.stop();   // 第二条没等到译文
+
+    const rows = fs.readFileSync(path.join(info.dir, 'journal.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((o) => o.kind === 'seg');
+    assert.equal(rows.length, 2);
+    assert.ok(rows[0].enAt >= before && rows[0].zhAt >= rows[0].enAt + 10,
+      `zhAt 要晚于 enAt：${JSON.stringify(rows[0])}`);
+    assert.equal(rows[0].mt, 'hymt7b');
+    assert.ok(rows[1].enAt >= before);
+    assert.equal(rows[1].zhAt, undefined, '没等到译文的条目不该有 zhAt');
+    assert.equal(rows[1].mt, undefined);
+
+    // 读流水账的几条路照旧只认原来那几个字段
+    const t = await rec.loadTranscript(info.dir);
+    assert.deepEqual(Object.keys(t.segments[0]).sort(), ['en', 'id', 't0', 't1', 'zh']);
+  });
+
   test('翻译失败的条目要放行，不能把队列卡死', async () => {
     const info = await rec.start({ title: '失败', formats: ['txt'] });
     const a = rec.addSegment({ t0: 0, t1: 1000, en: 'Alpha.' });

@@ -164,12 +164,18 @@ class LectureRecorder {
 
   /**
    * 收到一条识别结果。译文稍后由 setTranslation 补上。
+   *
+   * t0/t1 是这段音频在录音里的位置；enAt/zhAt 是英文和译文各自出炉的墙钟时刻
+   * （epoch 毫秒），两者一减就是字幕实际落后说话多久。流水账里两种都记：
+   * 只有音频位置的话，识别和翻译花了多久就无从查起，算不了带计算耗时的延迟。
    * @returns 这条的 id，用来回填译文
    */
   addSegment({ t0, t1, en }) {
     if (!this.session) throw new Error('没有正在进行的记录');
     const id = this.session.nextId++;
-    this.session.pending.push({ id, t0, t1, en: String(en || '').trim(), zh: null, done: false });
+    this.session.pending.push({
+      id, t0, t1, en: String(en || '').trim(), zh: null, done: false, enAt: Date.now(),
+    });
     // 理论上是有序到达，但音频分段与识别并发时不保证，稳妥起见排一次
     this.session.pending.sort((a, b) => a.t0 - b.t0 || a.id - b.id);
     return id;
@@ -177,12 +183,16 @@ class LectureRecorder {
 
   /**
    * 回填译文（zh 为 null 表示翻译失败，也要放行，否则队列会永久卡住）。
+   * @param mt 这句是哪条通道译的（opus / hymt7b / online…），记进流水账，
+   *           数字守卫退回兜底模型的那几句要能数出来
    */
-  setTranslation(id, zh) {
+  setTranslation(id, zh, { mt = null } = {}) {
     if (!this.session) return;
     const row = this.session.pending.find((r) => r.id === id);
     if (!row) return;
     row.zh = zh == null ? '' : String(zh).trim();
+    row.zhAt = Date.now();
+    if (mt) row.mt = String(mt);
     row.done = true;
     this._drain();
   }
@@ -203,8 +213,11 @@ class LectureRecorder {
     const rel0 = row.t0 - 0; // 这里的 t0 已经是相对录制开始的毫秒
     const rel1 = row.t1 - 0;
 
+    /* 停止时还没等到译文的条目没有 zhAt，就不写这一项：
+       写成停止那一刻会被当成「译文这时才到」，把延迟算歪。 */
     fs.appendFileSync(s.journalPath, `${JSON.stringify({
       kind: 'seg', id: row.id, t0: row.t0, t1: row.t1, en: row.en, zh: row.zh,
+      enAt: row.enAt, ...(row.zhAt ? { zhAt: row.zhAt } : {}), ...(row.mt ? { mt: row.mt } : {}),
     })}\n`, 'utf8');
 
     if (s.files.md) {
