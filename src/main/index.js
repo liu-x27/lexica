@@ -34,7 +34,7 @@ const { runShotSequence, seedShotProfile } = require('./self-test');
  * 看起来完全像是「这台机器起不了 GUI」，实际只是被自己那个正在跑的实例挡住了。
  * 截图模式本来就用独立的临时 userData（见文件末尾 LEXICA_SHOT_PROFILE 那段），
  * 和正式实例并存不会碰到真实生词本，所以直接跳过这个锁。 */
-if (!process.env.LEXICA_SHOT && !app.requestSingleInstanceLock()) {
+if (!process.env.LEXICA_SHOT && !process.env.LEXICA_BENCH && !app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }
@@ -689,15 +689,21 @@ function applySelectionMode() {
 /*  IPC                                                                        */
 /* ========================================================================== */
 
+/** 通道 → 处理函数。基准模式没有界面，靠它从主进程里直接走同一批入口 */
+const ipcHandlers = new Map();
+
 function registerIpc() {
-  const handle = (channel, fn) => ipcMain.handle(channel, (_e, ...args) => {
-    try {
-      return fn(...args);
-    } catch (err) {
-      console.error(`[ipc:${channel}]`, err);
-      return { __error: err.message };
-    }
-  });
+  const handle = (channel, fn) => {
+    ipcHandlers.set(channel, fn);
+    ipcMain.handle(channel, (_e, ...args) => {
+      try {
+        return fn(...args);
+      } catch (err) {
+        console.error(`[ipc:${channel}]`, err);
+        return { __error: err.message };
+      }
+    });
+  };
 
   /* ---- 词典 ---- */
   handle('dict:stats', () => ({
@@ -883,6 +889,10 @@ function registerIpc() {
     const r = await translateRaw(text, kind);
     return r?.ok ? { ...r, text: fixTerms(text, r.text) } : r;
   }
+
+  /** 实际译出这句的通道（在线服务名或本地模型 key），记进流水账 */
+  const mtLabel = (r) => (!r?.ok ? null
+    : (r.via === 'online' ? online.provider : (r.model || translator.model)));
 
   /* ================================================================== */
   /*  术语表：在机器翻译的输出上做一层用户可控的修正                      */
@@ -1470,10 +1480,11 @@ function registerIpc() {
       const r = await translateOne(text, 'live');
       const mtMs = Date.now() - t0;
       const zh = r && r.ok ? r.text : null;
-      lectures.setTranslation(id, zh);
+      // 记下实际译这一句的通道（在线服务名或本地模型），流水账里要看得出来
+      const mt = mtLabel(r);
+      lectures.setTranslation(id, zh, { mt });
       lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
-      console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词,`
-        + ` ${r?.via === 'online' ? online.provider : translator.model})`);
+      console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词, ${mt || '失败'})`);
     } finally {
       lec.mtInFlight -= 1;
     }
@@ -1801,7 +1812,7 @@ function registerIpc() {
         if (translator.available || online?.available) {
           const tr = await translateOne(text, 'batch');
           const zh = tr && tr.ok ? tr.text : null;
-          lectures.setTranslation(id, zh);
+          lectures.setTranslation(id, zh, { mt: mtLabel(tr) });
           lecSend('lec:translated', { id, zh });
         } else {
           lectures.setTranslation(id, null);
@@ -1974,10 +1985,13 @@ function installDisplayMediaHandler() {
  *   两个会话同时跑 shot 时共用同一个 user.db 和课堂目录；为了干净开始手动 rm -rf，
  *   又把另一个会话正在跑的那一轮拆掉了——实际发生过一次。
  *   断言也依赖干净状态（「我写过的」该筛出 1 条，旧数据残留时是 2 条）。
- * LEXICA_SHOT_PROFILE 可以显式指定目录。 */
-if (process.env.LEXICA_SHOT) {
+ * LEXICA_SHOT_PROFILE 可以显式指定目录。
+ * 基准模式（LEXICA_BENCH）同理：设置、术语表、课堂记录都落在一次性的目录里，
+ * 跑基准既不会改到你的设置，你的术语表也不会混进基准的译文。 */
+if (process.env.LEXICA_SHOT || process.env.LEXICA_BENCH) {
   const profile = process.env.LEXICA_SHOT_PROFILE
-    || fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lexica-shot-'));
+    || fs.mkdtempSync(path.join(require('node:os').tmpdir(),
+      process.env.LEXICA_BENCH ? 'lexica-bench-' : 'lexica-shot-'));
   app.setPath('userData', profile);
 }
 
@@ -2044,6 +2058,28 @@ app.whenReady().then(() => {
   }
 
   registerIpc();
+
+  /* 基准模式：不建窗口、托盘、热键，把公开测试集的音频按实时节奏喂进同一条
+     字幕流水线，跑完就退出。计划文件由 scripts/bench-stream.mjs 生成。 */
+  if (process.env.LEXICA_BENCH) {
+    const { runBench } = require('./bench');
+    /* app.exit 不发 will-quit，子进程得自己收：whisper-server 和 llama-server
+       在 Windows 上不会跟着父进程退出。 */
+    const finish = (code) => {
+      try { translator?.dispose(); asr?.dispose(); rollAsr?.dispose(); } catch { /* 忽略 */ }
+      app.exit(code);
+    };
+    runBench(process.env.LEXICA_BENCH, {
+      call: (channel, ...args) => ipcHandlers.get(channel)(...args),
+      // 等实时字幕的翻译模型载好再开始喂，第一句的延迟别算进模型加载
+      warmup: () => translator.warmup(),
+      settings,
+      userData: app.getPath('userData'),
+    }).then((code) => finish(code || 0))
+      .catch((e) => { console.error('[bench]', e); finish(1); });
+    return;
+  }
+
   createMainWindow();
   createQuickWindow();
   buildTray();
