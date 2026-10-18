@@ -1172,6 +1172,8 @@ function registerIpc() {
     busy: false,
     dropped: 0,
     lagWarned: false,
+    /** 已经送去翻译、还没回来的条数。停止时要等它归零，见 lec:stop */
+    mtInFlight: 0,
   };
 
   /* 字幕事件要同时发给主窗口和悬浮窗：两边都可能在显示同一条流水线的结果
@@ -1227,6 +1229,10 @@ function registerIpc() {
     if (settings.lectureMtModel && settings.lectureMtModel !== translator.model) {
       translator.setModel(settings.lectureMtModel);
     }
+    /* 启动时预热的是查词用的那个模型（mtModel），实时字幕用的可能是另一个。
+       不在这里预热，第一句字幕的译文就要等模型现加载（opus 约 2 秒，
+       llama-server 载 7B 的权重要更久）。 */
+    if (translator.available) translator.warmup();
 
     const info = await lectures.start({
       title,
@@ -1250,8 +1256,14 @@ function registerIpc() {
     const { pcm, startMs } = payload || {};
     if (!pcm) return;
     // 结构化克隆过来的是 ArrayBuffer，转回 Float32 视图
-    const audio = new Float32Array(pcm);
+    enqueueLecture(new Float32Array(pcm), startMs);
+  });
 
+  /**
+   * 一段切好的音频进识别队列。采音那边（lec:feed）和自测/基准的喂入
+   * （lec:selfTestFeed）都走这里，积压丢弃的规则只有这一份。
+   */
+  function enqueueLecture(audio, startMs) {
     /* 队列积压说明识别跟不上（换了 small 模型、或者机器一时被别的程序占满）。
        上限给到 12 段（约一分钟音频）：base 模型有 3.6 倍余量，正常情况下压根不会积压，
        留这么多是为了扛住偶发的卡顿——一分钟的积压大约 17 秒就能追平。
@@ -1269,7 +1281,7 @@ function registerIpc() {
     }
     lec.queue.push({ audio, startMs, queuedAt: Date.now() });
     drainLecture();
-  });
+  }
 
   /* ---- 滚动字幕（临时稿）----
    *
@@ -1452,14 +1464,19 @@ function registerIpc() {
       lecSend('lec:translated', { id, zh: null, reason: '未安装翻译模型' });
       return;
     }
-    const t0 = Date.now();
-    const r = await translateOne(text, 'live');
-    const mtMs = Date.now() - t0;
-    const zh = r && r.ok ? r.text : null;
-    lectures.setTranslation(id, zh);
-    lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
-    console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词,`
-      + ` ${r?.via === 'online' ? online.provider : translator.model})`);
+    lec.mtInFlight += 1;
+    try {
+      const t0 = Date.now();
+      const r = await translateOne(text, 'live');
+      const mtMs = Date.now() - t0;
+      const zh = r && r.ok ? r.text : null;
+      lectures.setTranslation(id, zh);
+      lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
+      console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词,`
+        + ` ${r?.via === 'online' ? online.provider : translator.model})`);
+    } finally {
+      lec.mtInFlight -= 1;
+    }
   }
 
   handle('lec:stop', async () => {
@@ -1487,6 +1504,13 @@ function registerIpc() {
         break;
       }
     }
+    /* 识别排完了，最后一两句的译文可能还在路上。不等的话 lectures.stop()
+       会把它们按「没有译文」写掉，译文回来时会话已经关了，就此丢掉。
+       翻译本身有超时（在线 1.2 秒、本地 60 秒），这里再兜一个上限。 */
+    const mtWaitFrom = Date.now();
+    while (lec.mtInFlight > 0 && Date.now() - mtWaitFrom < STALL_MS) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
     const out = await lectures.stop();
     asr.stop();
     stopRollAsr();
@@ -1505,8 +1529,12 @@ function registerIpc() {
    * 打包版跑到这步卡了 19 分钟只出 2 条——Chromium 会把不可见窗口的定时器
    * 限流到每秒一次。主进程没有这个限制。
    *
-   * 这里用的是和真实采音同一个 VadChunker、同一个 lec:feed 通道，
-   * 所以除「拿到麦克风音频」之外的每一环都被覆盖。
+   * 这里用的是和真实采音同一个 VadChunker、同一个入队函数（enqueueLecture），
+   * 所以除「拿到麦克风音频」之外的每一环都被覆盖。基准模式（bench.js）
+   * 也走这里，speed 给 1。
+   *
+   * @returns startedAt 喂第一块的墙钟时刻：流水账里的 enAt/zhAt 减去它，
+   *          就是字幕在这段音频的时间轴上出现的位置（speed 为 1 时）
    */
   handle('lec:selfTestFeed', async ({ pcm, speed = 4 } = {}) => {
     if (!lectures.active) return { error: '没有正在进行的记录' };
@@ -1518,22 +1546,27 @@ function registerIpc() {
       silenceMs: settings.lectureSilenceMs,
     });
 
-    const sliceMs = 100;
-    const step = Math.round(16000 * (sliceMs / 1000));
-    const paceMs = Math.max(1, Math.round(sliceMs / speed));
+    // 和采音那边的 AudioWorklet 一样，一块 2048 个采样点（128ms）
+    const step = 2048;
     let fed = 0;
     let partials = 0;
     let lastPartial = 0;
 
+    /* 节拍对齐到开始时刻，不在每块之后固定睡一段：setTimeout 每次都会多睡一点
+       （Windows 上常是几毫秒），一小时的音频喂下来会慢出几十秒，基准量出来的
+       延迟就混进了喂料本身的拖沓。每一块等到它最后一个采样点「说出来」的
+       时刻才推进去，和麦克风一样。 */
+    const startedAt = Date.now();
     for (let i = 0; i < audio.length; i += step) {
-      const part = audio.subarray(i, Math.min(i + step, audio.length));
-      const cuts = vad.push(part);
+      const end = Math.min(i + step, audio.length);
+      const due = startedAt + ((end / 16000) * 1000) / speed;
+      await new Promise((r) => setTimeout(r, Math.max(0, due - Date.now())));
+      if (!lectures.active) break;
+
+      const cuts = vad.push(audio.subarray(i, end));
       for (const cut of cuts) {
-        /* 走和渲染层完全一样的入队路径，包括积压丢弃逻辑。
-           直接调 drainLecture 会绕开那部分，验证就不完整了。 */
-        lec.queue.push({ audio: cut.pcm, startMs: cut.startMs, queuedAt: Date.now() });
+        enqueueLecture(cut.pcm, cut.startMs);
         fed += 1;
-        drainLecture();
       }
 
       /* 临时稿也要在自测里走一遍，判断逻辑照抄 audio-source.js：
@@ -1553,15 +1586,20 @@ function registerIpc() {
       } else if (cuts.length) {
         lastPartial = Date.now();
       }
-      await new Promise((r) => setTimeout(r, paceMs));
     }
-    const tail = vad.flush();
+    const tail = lectures.active ? vad.flush() : null;
     if (tail) {
-      lec.queue.push({ audio: tail.pcm, startMs: tail.startMs, queuedAt: Date.now() });
+      enqueueLecture(tail.pcm, tail.startMs);
       fed += 1;
-      drainLecture();
     }
-    return { fedSeconds: audio.length / 16000, chunks: fed, partials, speed };
+    return {
+      fedSeconds: audio.length / 16000,
+      chunks: fed,
+      partials,
+      speed,
+      startedAt,
+      wallSeconds: (Date.now() - startedAt) / 1000,
+    };
   });
 
   /* ---- 电影字幕悬浮窗 ---- */
