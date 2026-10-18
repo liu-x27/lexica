@@ -100,10 +100,13 @@ class AsrEngine extends EventEmitter {
    * @param dir data/asr 目录
    * @param maxChunkSec 单段音频上限（秒）。必须与 VadChunker 的 maxMs 一致——
    *        它决定 --audio-ctx 取多大，超出会静默截断（见 _spawn 的注释）。
+   * @param binDir whisper-server.exe 和它那些 dll 所在的目录，默认就是 dir。
+   *        换一个 whisper.cpp 构建（比如 CUDA 版）时指过去，模型照旧从 dir/models 读。
    */
-  constructor(dir, { maxChunkSec = 9, threads = 0, tag = 'asr' } = {}) {
+  constructor(dir, { maxChunkSec = 9, threads = 0, tag = 'asr', binDir = null } = {}) {
     super();
     this.dir = dir;
+    this.binDir = binDir || dir;
     this.maxChunkSec = maxChunkSec;
     /* 线程数可以指定：滚动字幕会再起一个服务跑临时稿，
        那一个必须限死几个核，否则会把准确那一遍挤慢。 */
@@ -118,9 +121,9 @@ class AsrEngine extends EventEmitter {
     this.failures = 0;
   }
 
-  get exePath() { return path.join(this.dir, 'whisper-server.exe'); }
+  get exePath() { return path.join(this.binDir, 'whisper-server.exe'); }
 
-  get cliPath() { return path.join(this.dir, 'whisper-cli.exe'); }
+  get cliPath() { return path.join(this.binDir, 'whisper-cli.exe'); }
 
   /** 运行时和至少一个模型都在，才算可用 */
   get available() {
@@ -218,7 +221,7 @@ class AsrEngine extends EventEmitter {
     if (prompt) args.push('--prompt', prompt, '--carry-initial-prompt');
 
     const proc = spawn(this.exePath, args, {
-      cwd: this.dir,          // dll 在同目录，必须让它找得到
+      cwd: this.binDir,       // dll 在同目录，必须让它找得到
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -385,7 +388,7 @@ class AsrEngine extends EventEmitter {
         ...(prompt ? ['--prompt', prompt] : []),
         '-oj', '-of', outBase,
         '-pp',
-      ], { cwd: this.dir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      ], { cwd: this.binDir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 
       let log = '';
       const onData = (d) => {

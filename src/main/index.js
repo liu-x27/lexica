@@ -2046,7 +2046,10 @@ app.whenReady().then(() => {
   /* 语音识别不在启动时拉起：whisper-server 常驻要占几百 MB 内存和一个端口，
      只有真的开始上课记录时才值得。这里只构造，start() 由界面触发。
      maxChunkSec 必须与渲染层 VadChunker 的 maxMs 一致——它决定 audio-ctx。 */
-  asr = new AsrEngine(path.join(dataDir, 'asr'), { maxChunkSec: LECTURE_MAX_CHUNK_SEC });
+  /* LEXICA_ASR_BIN 指向另一个 whisper.cpp 构建（比如 CUDA 版）的目录，模型照旧读 data/asr/models。
+     基准（scripts/bench-stream.mjs --asr-bin）用它比较 CPU 和显卡两种构建。 */
+  const asrBin = process.env.LEXICA_ASR_BIN || null;
+  asr = new AsrEngine(path.join(dataDir, 'asr'), { maxChunkSec: LECTURE_MAX_CHUNK_SEC, binDir: asrBin });
   /* 临时稿单独一个服务。
    *
    * 为什么不复用主服务：请求在服务端是串行的，一次临时稿（small+beam5 约 900ms）
@@ -2057,6 +2060,7 @@ app.whenReady().then(() => {
     maxChunkSec: LECTURE_MAX_CHUNK_SEC,
     threads: 4,
     tag: 'roll',
+    binDir: asrBin,
   });
   lectures = new LectureRecorder(path.join(app.getPath('userData'), 'lectures'));
 

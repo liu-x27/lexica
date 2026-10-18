@@ -6,6 +6,8 @@
  *   node scripts/fetch-asr.mjs --model tiny 更快但准确率低
  *   node scripts/fetch-asr.mjs --model small 更准但跑不动实时，只适合课后转写
  *   node scripts/fetch-asr.mjs --all        三个模型都下
+ *   node scripts/fetch-asr.mjs --cuda       另下同一构建的 CUDA 12.4 版（约 643 MB）到 data/asr-cuda/，
+ *                                           模型共用 data/asr/models。基准和 eval:asr 用 --asr-bin / --bin 指过去
  *
  * 为什么用预编译的 exe 而不是 Node 原生模块：本机没有 MSVC，编不了原生模块
  * （见 memory: node-sqlite-instead-of-native）。而 whisper.cpp 官方发布 Windows
@@ -130,8 +132,53 @@ function unzip(zip, dest) {
   });
 }
 
+/* CUDA 版：和上面 CPU 版同一个构建号，这样拿两边的转写逐字比，差别只可能来自后端。
+   这个包是给 sm_50~sm_90 编的，没有 50 系（sm_120）的机器码，只带 compute_90 的 PTX，
+   在 50 系显卡上靠驱动现编（第一次启动会慢），能不能跑要实测（npm run eval:asr -- --bin）。
+   压缩包自带 cudart/cuBLAS 的 dll，不用装 CUDA 工具包。sha256 取自 GitHub release API。 */
+const CUDA_ZIP = {
+  name: 'whisper-cublas-12.4.0-bin-x64.zip',
+  bytes: 674539285,
+  sha256: 'af520ddd034d985b55dfeea3e465ed93653ba2aee1a55e865033edc548c272a7',
+};
+const CUDA_DIR = path.join(ROOT, 'data', 'asr-cuda');
+
+async function fetchCuda() {
+  const origin = `https://github.com/ggml-org/whisper.cpp/releases/download/${BUILD}/${CUDA_ZIP.name}`;
+  console.log(`下载 whisper.cpp ${BUILD} 的 CUDA 12.4 版 → ${CUDA_DIR}\n`);
+  if (fs.existsSync(path.join(CUDA_DIR, 'whisper-server.exe'))) {
+    console.log('  ✓ 已存在（要重下就先删掉 data/asr-cuda）');
+    return;
+  }
+  const { grabVerified } = await import('./lib/fetch-verified.mjs');
+  const tmp = path.join(CUDA_DIR, `.${CUDA_ZIP.name}`);
+  await grabVerified([...MIRRORS.map((m) => m(origin))], tmp, { ...CUDA_ZIP, label: CUDA_ZIP.name });
+  const stage = path.join(CUDA_DIR, '.stage');
+  await fsp.rm(stage, { recursive: true, force: true });
+  await unzip(tmp, stage);
+  let picked = 0;
+  const walk = async (dir) => {
+    for (const e of await fsp.readdir(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { await walk(p); continue; }
+      // CUDA 版的 dll 多（ggml-cuda、cudart、cublas、cublasLt），一律留着
+      if (!/^whisper-(server|cli)\.exe$/.test(e.name) && !/\.dll$/i.test(e.name)) continue;
+      await fsp.copyFile(p, path.join(CUDA_DIR, e.name));
+      picked++;
+    }
+  };
+  await walk(stage);
+  await fsp.rm(stage, { recursive: true, force: true });
+  await fsp.rm(tmp, { force: true });
+  if (!fs.existsSync(path.join(CUDA_DIR, 'whisper-server.exe'))) {
+    throw new Error('解压后找不到 whisper-server.exe，压缩包结构可能变了');
+  }
+  console.log(`  取出 ${picked} 个文件。核对：npm run eval:asr -- --bin data/asr-cuda --against dist/asr-quality/<CPU 那一轮>`);
+}
+
 async function main() {
   const argv = process.argv.slice(2);
+  if (argv.includes('--cuda')) return fetchCuda();
   const only = argv.includes('--model') ? argv[argv.indexOf('--model') + 1] : null;
   const all = argv.includes('--all');
   const picks = all ? Object.keys(MODELS) : [only && MODELS[only] ? only : 'base'];

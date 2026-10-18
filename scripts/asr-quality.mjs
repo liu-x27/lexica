@@ -13,6 +13,13 @@
  *
  * 每个配置起一个独立的 whisper-server，所有配置共用同一批 VAD 分段。
  * 各配置的转写结果写到 dist/asr-quality/，方便逐句看错在哪。
+ *
+ * 换 whisper.cpp 构建（比如 CUDA 版）时用这几个参数核对：
+ *   --bin <目录>       用这个目录里的 whisper-server.exe（模型照旧读 data/asr/models）
+ *   --out <目录>       转写结果写到别处，默认 dist/asr-quality
+ *   --against <目录>   和另一轮的转写逐字比对（比如 CPU 版那一轮的 --out）
+ *   --only <关键词>    只跑名字里带这个词的配置，比如 --only 默认
+ * 服务的启动日志存成 <配置>.server.log，里面能看出它实际用的是 CPU 还是 CUDA。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,13 +31,19 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ASR = path.join(ROOT, 'data', 'asr');
 const WAV = path.join(ROOT, 'scripts', 'fixtures', 'lecture.wav');
-const OUT = path.join(ROOT, 'dist', 'asr-quality');
 const PORT = 8802;
 const require = createRequire(import.meta.url);
 const { VadChunker } = require('../src/main/vad-chunker.js');
 
+const argv = process.argv.slice(2);
+const arg = (k) => (argv.includes(k) ? argv[argv.indexOf(k) + 1] : null);
+const BIN = arg('--bin') ? path.resolve(arg('--bin')) : ASR;
+const OUT = arg('--out') ? path.resolve(arg('--out')) : path.join(ROOT, 'dist', 'asr-quality');
+const AGAINST = arg('--against') ? path.resolve(arg('--against')) : null;
+const ONLY = arg('--only');
+
 const MODELS = { base: 'ggml-base.en-q5_1.bin', small: 'ggml-small.en-q5_1.bin' };
-const missing = [path.join(ASR, 'whisper-server.exe'), ...Object.values(MODELS).map((m) => path.join(ASR, 'models', m))]
+const missing = [path.join(BIN, 'whisper-server.exe'), ...Object.values(MODELS).map((m) => path.join(ASR, 'models', m))]
   .filter((f) => !fs.existsSync(f));
 if (missing.length) {
   console.error(`缺少识别组件：\n  ${missing.map((f) => path.relative(ROOT, f)).join('\n  ')}\n`
@@ -172,24 +185,50 @@ const ac = Math.max(256, Math.min(1500, Math.ceil(MAXSEC * 49 * 1.1)));
 fs.mkdirSync(OUT, { recursive: true });
 
 console.log(`音频 ${audioSec.toFixed(1)}s，切成 ${chunks.length} 段，audio-ctx ${ac}`);
-console.log(`参考答案 ${norm(REF).split(' ').length} 词\n`);
-console.log('  配置                        WER      错词   最慢段   实时倍率  判定');
+console.log(`参考答案 ${norm(REF).split(' ').length} 词`);
+if (BIN !== ASR) console.log(`whisper 构建：${BIN}`);
+console.log('\n  配置                        WER      错词   最慢段   实时倍率  判定');
 
-for (const cfg of CONFIGS) {
-  const srv = spawn(path.join(ASR, 'whisper-server.exe'), [
+/**
+ * 从服务的启动日志里看它实际用的是什么后端。CUDA 版找不到能用的显卡时会悄悄退回 CPU，
+ * 只看速度分不清，要看这两行：
+ *   whisper_backend_init_gpu: using CUDA0 backend   （或者 no GPU found）
+ *   ggml_cuda_init: … Device 0: NVIDIA …, compute capability 12.0
+ */
+function backendOf(log) {
+  const gpu = log.match(/whisper_backend_init_gpu: using (\S+) backend/);
+  if (!gpu) return /no GPU found/.test(log) ? 'CPU（日志：no GPU found）' : 'CPU';
+  const dev = log.match(/Device \d+: ([^\n,]+), compute capability ([\d.]+)/);
+  return `${gpu[1]}${dev ? `（${dev[1].trim()}，算力 ${dev[2]}）` : ''}`;
+}
+
+const ONLY_CONFIGS = ONLY ? CONFIGS.filter((c) => c.name.includes(ONLY)) : CONFIGS;
+if (!ONLY_CONFIGS.length) { console.error(`没有名字里带「${ONLY}」的配置`); process.exit(2); }
+
+const fileOf = (cfg) => `${cfg.name.replace(/[^\w]/g, '_')}.txt`;
+for (const cfg of ONLY_CONFIGS) {
+  const srv = spawn(path.join(BIN, 'whisper-server.exe'), [
     '-m', path.join(ASR, 'models', MODELS[cfg.model]),
     '--host', '127.0.0.1', '--port', String(PORT),
     '-t', '12', '-ac', String(ac), ...cfg.args,
     ...(cfg.prompt ? ['--prompt', cfg.prompt, '--carry-initial-prompt'] : []),
-  ], { cwd: ASR, stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
+  ], { cwd: BIN, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let log = '';
+  const keep = (d) => { log += d; };
+  srv.stdout.on('data', keep);
+  srv.stderr.on('data', keep);
 
   try {
     let up = false;
-    for (let i = 0; i < 120 && !up; i++) {
+    // CUDA 版第一次在新显卡上要把 PTX 现编成机器码，可能要好几分钟，等久一点
+    for (let i = 0; i < 2000 && !up; i++) {
       await new Promise((r) => setTimeout(r, 300));
+      if (srv.exitCode !== null) break;
       try { await post(wrapWav(audio.subarray(0, rate), rate)); up = true; } catch { /* 还没起来 */ }
     }
-    if (!up) { console.log(`  ${cfg.name.padEnd(26)} 启动失败`); continue; }
+    fs.mkdirSync(OUT, { recursive: true });
+    fs.writeFileSync(path.join(OUT, fileOf(cfg).replace(/\.txt$/, '.server.log')), log, 'utf8');
+    if (!up) { console.log(`  ${cfg.name.padEnd(26)} 启动失败（日志见 .server.log）`); continue; }
 
     const texts = [];
     let total = 0;
@@ -208,8 +247,26 @@ for (const cfg of CONFIGS) {
     const ok = slowest < MAXSEC * 1000 ? (rtf > 2 ? '✓ 有余量' : '△ 勉强') : '✗ 跟不上';
     console.log(`  ${cfg.name.padEnd(26)} ${(w.wer * 100).toFixed(1).padStart(5)}%  `
               + `${String(w.errs).padStart(4)}   ${String(slowest).padStart(5)}ms  `
-              + `${rtf.toFixed(2).padStart(7)}x  ${ok}`);
-    fs.writeFileSync(path.join(OUT, `${cfg.name.replace(/[^\w]/g, '_')}.txt`), hyp, 'utf8');
+              + `${rtf.toFixed(2).padStart(7)}x  ${ok}  ${backendOf(log)}`);
+    fs.writeFileSync(path.join(OUT, fileOf(cfg)), hyp, 'utf8');
+    // 最后再存一次日志：识别过程中打的（显存分配之类）也要留下
+    fs.writeFileSync(path.join(OUT, fileOf(cfg).replace(/\.txt$/, '.server.log')), log, 'utf8');
+
+    if (AGAINST) {
+      const other = path.join(AGAINST, fileOf(cfg));
+      if (!fs.existsSync(other)) {
+        console.log(`    （${path.relative(ROOT, AGAINST)} 里没有这个配置的转写，没比）`);
+      } else {
+        const theirs = fs.readFileSync(other, 'utf8');
+        if (theirs === hyp) console.log('    与对照那一轮逐字相同 ✓');
+        else {
+          let i = 0;
+          while (i < hyp.length && hyp[i] === theirs[i]) i++;
+          console.log(`    与对照那一轮不同 ✗，第 ${i} 个字符起：\n      本轮 …${hyp.slice(Math.max(0, i - 30), i + 50)}\n`
+            + `      对照 …${theirs.slice(Math.max(0, i - 30), i + 50)}`);
+        }
+      }
+    }
   } finally {
     srv.kill();
     await new Promise((r) => setTimeout(r, 700));
