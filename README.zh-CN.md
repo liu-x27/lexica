@@ -111,7 +111,11 @@ scripts/
   fetch-data.mjs   下载 + 解包（自建 CONNECT 隧道、断点续传、镜像回源校验）
   build-db.mjs     三份数据合并建库、建索引、建全文检索与纠错候选
   pack.mjs         手工打包免安装版
-  asr-quality.mjs  识别质量对比：七种配置按 WER 打分（npm run eval:asr）
+  asr-quality.mjs  识别质量对比：七种配置按 WER 打分（npm run eval:asr），也能比两个 whisper 构建
+  fetch-bench.mjs  下载并整理公开基准：MCIF 带中文参考的 21 场演讲（每个文件按 sha256 核）
+  bench-stream.mjs 按实时节奏跑一轮基准（npm run bench）
+  bench-score.py   给一轮基准打分：LongYAAL/LongLAAL、BLEU、chrF、WER、XCOMET-XL
+  fetch-mt-hymt.mjs  下载 Hy-MT2 与 llama.cpp（npm run fetch:mt:hymt）
   probe-glossary-carriers.js  实验：怎么问模型才能拿到它在句子里的错译写法
 src/main/
   index.js         窗口、托盘、全局热键、IPC
@@ -119,7 +123,10 @@ src/main/
   dict-db.js       只读查询层：查词、词形还原、纠错、全文检索、句中术语
   text-keys.js     建库与查询共用的键：soundex、汉字切分、中文释义切片段
   user-db.js       生词本（含自有释义与笔记）、历史、设置、SM-2 调度
-  translate.js     机器翻译（utilityProcess + 可切换模型）
+  translate.js     机器翻译（ONNX 走 utilityProcess，Hy-MT2 走 llama-server，可切换模型）
+  hymt.js          Hy-MT2 的官方提示词模板（含术语模板）
+  llama-server.js  llama.cpp 常驻服务的包装（和 asr.js 包 whisper-server 一个套路）
+  number-guard.js  数字守卫：译文里少了原文的数字就退回兜底模型
   translate-online.js  在线翻译（默认关，失败自动退回本地）
   word-at.js       点词取词（主进程测试与渲染层共用，双导出）
   glossary-packs.js  术语表起步包（按课程方向分，附选词原则）
@@ -131,6 +138,7 @@ src/main/
   lecture.js       课堂记录：待写队列、md/txt/srt/json、崩溃恢复
   preload.js       contextBridge 暴露的唯一接口
   self-test.js     截图自测（npm run shot）的整套脚本
+  bench.js         基准模式（LEXICA_BENCH）：不开窗口，驱动实时字幕的同一条流水线
 src/renderer/
   css/tokens.css   设计令牌：双主题色板、字阶、间距、动效
   css/base.css     重置 + 排版原语 + 通用控件
@@ -146,7 +154,10 @@ data/
   raw/             下载的原始数据（可删）
   dict.db          构建产物，应用实际读取的词库
   asr/             whisper.cpp 运行时与语音模型（fetch:asr 下载）
-  model/           翻译模型（fetch:model / fetch:model:nllb）
+  asr-cuda/        whisper.cpp 的 CUDA 版（fetch:asr -- --cuda 下载），模型共用 asr/models
+  model/           翻译模型（fetch:model / fetch:model:nllb / fetch:mt:hymt）
+  llama/           llama.cpp 运行时，跑 Hy-MT2（fetch:mt:hymt 下载）
+  bench/           公开基准的音频与参考（fetch:bench 下载）
 ```
 
 ## 查词的解析顺序
@@ -324,6 +335,42 @@ npm run fetch:model
 `node scripts/eval-mt-candidates.mjs --probe` 列出候选与下载量，
 `--fetch <id>` 下载，`--run` 用同一批（现役模型翻错过的）句子并排对比。
 
+### Hy-MT2：换掉 opus 的那个（要显卡）
+
+```bash
+npm run fetch:mt:hymt                    # Hy-MT2-7B Q4_K_M（4.6 GB）+ llama.cpp b11190 的 CUDA 版（548 MB）
+npm run fetch:mt:hymt -- --model 1.8b    # 小一号：1.8B Q8_0（1.9 GB）
+npm run fetch:mt:hymt -- --no-llama      # 机器上已有 llama.cpp：只下模型，启动前设 LEXICA_LLAMA_DIR 指过去
+```
+
+腾讯的翻译专用模型 [Hy-MT2](https://arxiv.org/abs/2605.22064)（Apache-2.0）。官方 GGUF 跑在
+llama.cpp 的 `llama-server` 里，和 whisper-server 一个套路：预编译 exe 当子进程用，不碰原生模块。
+装好以后，设置页的两个翻译模型选项（查词 / 实时字幕）里都会出现它。每个下载文件都按 sha256 核。
+
+- **提示词逐字照官方模板**（论文表 1），测试钉死。专用翻译模型是按固定模板训的，
+  换个说法它就可能开始解释、续写。采样用贪心：同一句每次译得一样。
+- **术语表直接喂给它。** 这句英文里命中的术语，填进官方的「参考下面的翻译」模板。
+  opus / NLLB 只能事后把错法换掉，Hy-MT2 在翻译时就照着译：
+  `We train the policy with a replay buffer and a target network.` 不带术语表是「重放缓冲区」，
+  带上 `replay buffer = 经验回放缓冲` 就是「经验回放缓冲」。
+- **数字守卫**（`number-guard.js`）：原文里的数字没有原样出现在译文里，这一句就退回本地兜底模型重译
+  （实时字幕退 opus，整段翻译退 NLLB）。比的是整个数字串——63.8 不能在 163.8 里「找到」，
+  7 不能在 70 里「找到」。算作原样的写法只有这几种，每种都有测试：千分位（1,000 = 1000）、全角数字、
+  两位以内的整数写成汉字（3 = 三）、序数（1st = 第一）、年代（1990s = 90年代）、
+  量级（7 billion = 70亿）；反过来 `7 billion` 译成「7亿」差了十倍，拦下。
+  兜底那句也没对上的话留大模型那句：兜底模型在数字上不比它强（opus 正是 63.8 → 638 的那个）。
+  服务挂了或超时（实时字幕最多等 8 秒）也退回兜底，字幕不会空着。
+
+实测 7 句（`eval-mt-candidates.mjs` 里 opus 翻错过的 5 句、一句专门测数字的、一句日常英文；`-ngl 0` 只用 CPU、12 线程）：
+「代码和检查点，以便复现」「从71.2下降到63.8」「上下文学习」「65,536」「三磷酸腺苷」
+「70亿个参数……150万份文档」，全对，数字守卫一次都没拦。7B 一句 1.1–3.2 秒，1.8B 0.4–1.0 秒。
+在显卡上快得多：公开基准（见「[公开基准](#公开基准mcif-上的端到端成绩)」）里实时字幕每句中位 163 ms，
+比 opus 在 CPU 上的 252 ms 还快，1248 句里数字守卫也一次没触发。
+
+一个看着吓人、实际无害的告警：llama.cpp 载入 7B 的 GGUF 时报
+`special_eos_id is not in special_eog_ids`（文件里的结束符配置不规范）。实测生成都会自己停下
+（输出 12–35 个 token，远低于上限），所以没有加任何覆盖参数。
+
 ## 实时字幕（上课听写）
 
 在美国上课时边听边出双语字幕，同时把记录写进文件。完全离线。
@@ -405,7 +452,87 @@ WER 两次逐项相同。吞吐量会随机器状态变，WER 不会。
    涨到 6.3%——小模型的候选序列本来就不可靠，扩大搜索更容易选到错的。
    所以 beam 是按模型档位配的，不是全局设置。
 
-（这是 TTS 合成音频，比真实教室干净，绝对数字会更高，但相对排序可信。）
+（这是 TTS 合成音频，比真实教室干净，绝对数字会更高，但相对排序可信。下一节换成真实演讲，
+绝对数字确实高得多。）
+
+### 公开基准：MCIF 上的端到端成绩
+
+上面那张表出自一段 127 词的合成音频。这一节换成公开集：
+[MCIF](https://huggingface.co/datasets/FBK-MT/MCIF)（CC-BY-4.0，Papi et al. 2025）里带中文参考译文的
+21 场 ACL 2023 演讲，共 1.97 小时、919 句。IWSLT 2026 同传赛道的开发集就是它。
+
+**怎么跑的。** 不是另写一个评测脚本：`LEXICA_BENCH` 模式不开窗口，走和界面同一批入口——
+开始记录、按 2048 个采样点一块对齐墙钟喂音频（和麦克风一样）、停止。识别队列、积压丢弃、
+翻译路由、流水账都是正式那一套。每场按 1 倍速放完，21 场约 2 小时。设置是默认的：
+识别 small + beam5 + 领域提示词（课程名填 `ACL research talk`），滚动字幕开着，在线翻译关着，没有术语表。
+
+**怎么算的。**
+
+- 时延：[OmniSTEval](https://github.com/pe-trik/OmniSTEval) 0.1.10 的 LongYAAL 和 LongLAAL
+  （Polák et al. 2025），中文按字符。每个字记两个出炉时刻：
+  CU（不计算力）= 它所在那段音频的结束位置——流水线要等 VAD 在这里切下去才开始识别；
+  CA（计算力在内）= 译文真正出来的墙钟时刻。IWSLT 2026 按 CU 的 LongYAAL 分档：0–2 秒低时延、2–4 秒高时延。
+- 质量：OmniSTEval 重切分之后的 BLEU（zh 分词）与 chrF。
+- 识别：WER，规整方式和 MCIF 官方评测一样（whisper_normalizer 的 EnglishTextNormalizer + jiwer），21 场合起来算。
+- **StreamLAAL 没有算**：它要 mwerSegmenter，这台机器上装不了（mweralign 只有 Linux 的安装包，
+  原版没有 Windows 版，本机又没有编译器）。LongLAAL 是同一个公式，只是重切分换成 OmniSTEval 自带的方法。
+
+| 配置 | WER | BLEU | chrF | LongYAAL CU / CA | LongLAAL CU / CA | 中文晚到（中位 / p90） |
+|---|---|---|---|---|---|---|
+| CPU 识别 + opus（原来的默认） | 21.1% | 27.2 | 24.4 | 3.37 / 4.75 s | 4.09 / 5.81 s | 1.11 / 1.77 s |
+| CPU 识别 + Hy-MT2-7B（显卡） | 21.1% | 37.8 | 36.0 | 3.30 / 4.56 s | 4.14 / 5.73 s | 1.07 / 1.57 s |
+| 显卡识别 + Hy-MT2-7B（显卡） | 20.5% | 38.2 | 36.1 | 3.29 / 3.84 s | 4.12 / 4.82 s | 0.36 / 0.75 s |
+| CPU 识别 + Hy-MT2-1.8B（全程不用显卡） | 21.1% | 35.8 | 35.6 | 3.20 / 5.60 s | 4.05 / 7.00 s | 1.88 / 3.13 s |
+
+「中文晚到」是一段音频结束到它的中文出来的时间，不含等说话人停顿那几秒（那部分算在 CU 里）。
+本机：Intel Core Ultra 9 275HX（24 核）、RTX 5080 Laptop（16 GB）、32 GB 内存、Windows 11；
+whisper.cpp b5130（CPU 版与同一构建的 CUDA 12.4 版），llama.cpp b11190（CUDA 13.4）。
+
+几条读法：
+
+1. **Hy-MT2-7B 又准又快。** 前两行的识别结果逐字相同，只换了翻译：BLEU 27.2 → 37.8，chrF 24.4 → 36.0；
+   一句的翻译时间中位 252 → 163 ms——它在显卡上，不和 whisper 抢 CPU。数字守卫 1248 句一次都没触发。
+   原先准备的退路（实时字幕留 opus、只有整段翻译用 Hy-MT2）用不上：有显卡就整条换掉。
+2. **识别也上显卡，中文晚到少了三分之二。** 中位 1.07 → 0.36 秒，LongYAAL（CA）4.56 → 3.84 秒。
+   CU 几乎不动：它只取决于 VAD 在哪里切，和算得快慢无关。
+3. **没有独显也值得换。** 最后一行全程不碰显卡，Hy-MT2-1.8B 和 whisper 分 CPU：BLEU 27.2 → 35.8，
+   chrF 24.4 → 35.6；代价是一句要翻 1 秒左右（中位 999 ms），中文晚到中位 1.11 → 1.88 秒、p90 1.77 → 3.13 秒。
+   识别没被拖慢（英文晚到中位 0.85 → 0.83 秒）。
+4. **整块出字幕，时延就在 3 秒上下。** 作个参照：把参考译文本身在每句话结束的那一刻整句吐出来，
+   LongYAAL（CU）是 3.57 秒。这里按停顿切出来的块常常比整句短，所以 CU 在 3.3 秒左右，比整句吐还早一点，
+   但仍在 IWSLT「2–4 秒」那一档。要进 0–2 秒只能边说边出译文——那是滚动字幕的事，
+   而临时稿不进流水账，不在这里算分。
+5. **合成音频把识别想得太好了。** 合成音频上 WER 0.8%，真实演讲上 21.1%，最差的一场 51.5%。
+   主要不是听错：参考 16797 个词，插入 2075 处，比替换（1231）还多。按每秒超过 4.5 个词算，
+   有 30 个音频块是 whisper 在原地打转（一个 9 秒的块吐了 171 个词，同一句来回重复）；
+   另外分段之间的重叠有时让边界上的词转写两遍。
+   只把连续重复的片段折叠掉，WER 就到 16.6%——这是下一步要修的。
+6. **显卡版 whisper 准确率一样，但不是逐字相同。** 合成音频上默认配置逐字相同（11 倍 → 52 倍实时）；
+   两小时的真实演讲上，1248 个音频块有 384 个文字不同（80 个只差标点或大小写；不算原地打转的块，词级差 4.7%），
+   WER 一个 21.1%、一个 20.5%。原因是浮点误差让 beam search 走了不同的路。
+   合成音频上 base + beam5 更是从 6.3% 变成 12.6%——这个组合应用里不用。
+
+复现：
+
+```bash
+npm run fetch:bench                                   # 217 MB，每个文件按 sha256 核
+npm run bench -- --mt opus                            # 约 2 小时
+npm run bench -- --mt hymt7b --llama-dir <llama.cpp 目录>
+npm run fetch:asr -- --cuda                           # whisper 的 CUDA 版，643 MB
+npm run bench -- --mt hymt7b --asr-bin data/asr-cuda --llama-dir <llama.cpp 目录>
+npm run bench -- --mt hymt18b --cpu-only --llama-dir <llama.cpp 目录>
+python -I scripts/bench-score.py --run dist/bench/opus-cpu --data data/bench/mcif/prepared
+python -I scripts/bench-score.py --table dist/bench/opus-cpu dist/bench/hymt7b-cpu   # 排成上面那张表
+```
+
+打分要另配 Python 环境：OmniSTEval 0.1.10、jiwer 3.0.5、whisper-normalizer 0.0.10。
+中文 Windows 上装 OmniSTEval 依赖的 mosestokenizer 要先设 `PYTHONUTF8=1`：它的安装脚本按系统默认编码（GBK）读自己的 README。
+句级时间戳不在 MCIF 里，用的是 IWSLT 2025 同传基线仓库（pe-trik/iwslt25-baselines）对齐出来的那份；
+那个仓库没有声明许可证，所以只下载到本机用，不进版本库。
+
+跑要用显卡的配置之前，`bench` 会先看一眼显卡：占用超过 20% 或显存超过 4.5 GB 就不跑——
+别人的时延会被我们拖慢，我们的也会被别人拖慢。看的是占用率而不是进程列表：Windows 上
+`nvidia-smi` 的进程列表会把资源管理器、浏览器这些开着显卡上下文的程序都算进去，看不出谁在算。
 
 ### 翻译质量：为什么没做「用词库自动修正术语」
 
@@ -431,6 +558,9 @@ WER 两次逐项相同。吞吐量会随机器状态变，WER 不会。
 所以：翻译进程的 ONNX 线程数限制到 4，且实时字幕单独用一项设置
 （`lectureMtModel`，默认 opus），查词与翻译页仍用 `mtModel`（默认 NLLB）。
 转写文件里留着英文原文，课后想要更准的译文可以在翻译页重译。
+
+有显卡的话这个取舍不用再做：Hy-MT2-7B 跑在显卡上，一句比 opus 还快（公开基准里中位 163 ms 对 252 ms），
+也不占 CPU，实时字幕直接选它。没有独显时 Hy-MT2-1.8B 也能跑，但要和 whisper 分 CPU，见公开基准那张表的最后一行。
 
 ### 崩溃安全
 

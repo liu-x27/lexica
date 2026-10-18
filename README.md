@@ -17,7 +17,7 @@ both run with the network cable pulled out, on Windows and Android from one sour
 ![whisper.cpp](https://img.shields.io/badge/whisper.cpp-live_captions-b3402f?style=flat-square)
 ![Android](https://img.shields.io/badge/Android-same_source_tree-1c1a17?style=flat-square&logo=android&logoColor=white)
 ![No native modules](https://img.shields.io/badge/native_modules-none-1c1a17?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-270-1c1a17?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-329-1c1a17?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1c1a17?style=flat-square)](LICENSE)
 
 **[Project page](https://liu-x27.github.io/lexica/)** · [The dictionary](#the-dictionary) · [Captions](#real-time-captioning) · [Two platforms](#one-source-tree-two-platforms) · [Running it](#running-it) · [中文说明](README.zh-CN.md)
@@ -93,7 +93,8 @@ from an imported recording, written to a file as they go. Entirely offline.
 The English line is what the system is judged on. The Chinese under it comes from a
 118 MB local `opus-mt` model and is a rough gloss — good enough to follow along, wrong
 often enough that the transcript keeps both languages rather than replacing one with the
-other.
+other. With a GPU it can come from [Hy-MT2](#hy-mt2-behind-a-number-guard) instead, which
+scores ten BLEU points higher on the public benchmark below and is faster.
 
 Getting it usable took three changes:
 
@@ -126,6 +127,63 @@ per-configuration table, including the two settings that made WER *worse*, is in
 Silence-based chunking (`src/main/vad-chunker.js`) splits on pauses rather than a fixed
 clock, adapts its threshold to the room's noise floor, and keeps a lead-in so the first
 syllable of a sentence is not clipped.
+
+### On a public benchmark
+
+Everything above was measured on one synthetic clip. To get numbers anyone can reproduce,
+the captioner now replays [MCIF](https://huggingface.co/datasets/FBK-MT/MCIF) — the 21 ACL
+2023 talks that have Chinese reference translations (1.97 h, 919 sentences, CC-BY-4.0),
+which are also the dev set of the IWSLT 2026 simultaneous track — through its own pipeline
+in real time, and scores it the way that track does.
+
+`LEXICA_BENCH` runs the app with no windows and drives the same IPC handlers the UI uses:
+start a session, feed 2048-sample blocks against the wall clock exactly as the microphone
+does, stop. The queueing, backlog dropping, translation routing and journal are the
+production ones, not a reimplementation. Default settings throughout: `small` + beam-5 +
+domain prompt, rolling captions on, online translation off, no glossary.
+
+Latency is LongYAAL and LongLAAL from [OmniSTEval](https://github.com/pe-trik/OmniSTEval)
+at the character level, from two timestamps per character that the journal now records:
+*computation-unaware* (CU), the end of the audio chunk the character came from, and
+*computation-aware* (CA), when the translation actually appeared. IWSLT 2026 bins systems
+by CU LongYAAL into 0–2 s and 2–4 s. StreamLAAL is not reported: it needs mwerSegmenter,
+which has no Windows build, and its Python packaging (`mweralign`) ships Linux wheels only.
+LongLAAL is the same formula over OmniSTEval's own resegmentation.
+
+| configuration | WER | BLEU | chrF | LongYAAL CU / CA | Chinese line after chunk end, median / p90 |
+|---|---|---|---|---|---|
+| CPU whisper + `opus-mt` (the old default) | 21.1% | 27.2 | 24.4 | 3.37 / 4.75 s | 1.11 / 1.77 s |
+| CPU whisper + Hy-MT2-7B on the GPU | 21.1% | 37.8 | 36.0 | 3.30 / 4.56 s | 1.07 / 1.57 s |
+| CUDA whisper + Hy-MT2-7B on the GPU | 20.5% | 38.2 | 36.1 | 3.29 / 3.84 s | 0.36 / 0.75 s |
+| CPU whisper + Hy-MT2-1.8B, no GPU at all | 21.1% | 35.8 | 35.6 | 3.20 / 5.60 s | 1.88 / 3.13 s |
+
+Intel Core Ultra 9 275HX (24 cores), RTX 5080 Laptop GPU (16 GB), 32 GB RAM, Windows 11;
+whisper.cpp b5130 (its CPU and CUDA 12.4 builds), llama.cpp b11190. `npm run fetch:bench`
+and `npm run bench` reproduce it; scoring needs a separate Python environment, listed in the
+[Chinese README](README.zh-CN.md#公开基准mcif-上的端到端成绩).
+
+What it says:
+
+- **The synthetic clip flattered recognition.** 0.8% WER there, 21.1% here, 51.5% on the
+  worst talk. The largest error class is insertions — 2,075 against 1,231 substitutions over
+  16,797 reference words. 30 chunks come out at over 4.5 words a second because whisper
+  loops (one 9-second chunk produced 171 words of the same sentence), and the lead-in kept
+  between chunks sometimes gets a boundary word transcribed twice. Collapsing consecutive repeats alone brings WER to 16.6%; that is the next fix.
+- **Hy-MT2-7B is better and faster.** The first two rows share word-identical recognition,
+  so the ten BLEU points are the translator alone. On the GPU it also translates a line in a
+  median 163 ms against `opus-mt`'s 252 ms on the CPU, which it no longer fights whisper for.
+  The number guard fired on none of the 1,248 lines.
+- **Moving recognition to the GPU cuts the Chinese line's delay by two thirds.** CU latency
+  barely moves, since it depends only on where the chunker cuts; CA drops by 0.7 s.
+- **Without a GPU the switch is still worth it.** The last row never touches the GPU:
+  Hy-MT2-1.8B shares the CPU with whisper and still scores 35.8 BLEU against 27.2. The price
+  is about a second per line (median 999 ms), so the Chinese line lands 1.88 s after its chunk
+  instead of 1.11 s (p90 3.13 s instead of 1.77 s). Recognition itself does not slow down.
+- **The CUDA build is as accurate, not identical.** It matched the CPU build word for word on
+  the synthetic clip, at 52× real time instead of 11×. Over two hours, 384 of 1,248 chunks
+  differ (4.7% of words outside the looping chunks), and on the clip `base` with beam-5 went
+  from 6.3% to 12.6% WER — floating-point differences send beam search down other paths.
+  The shipped settings never use `base` with beam search.
 
 ### Where the latency actually goes
 
@@ -219,6 +277,33 @@ was checking — the assertion passed while testing nothing.
 Because the fallback is silent, the settings page shows the call, cache-hit and failure
 counts — otherwise there is no way to tell which path a given caption came from.
 
+### Hy-MT2 behind a number guard
+
+The offline alternative to that service. `npm run fetch:mt:hymt` downloads Tencent's
+[Hy-MT2](https://arxiv.org/abs/2605.22064) (Apache-2.0; 7B at Q4_K_M, 4.6 GB, or
+`--model 1.8b`) and a llama.cpp build, and it runs as a resident `llama-server` child
+process — the same pattern as `whisper-server`, so still no native modules. Three things
+make it more than a model swap:
+
+- **The official prompt, word for word**, pinned by a test. A dedicated translation model
+  is trained on fixed templates; paraphrase one and it starts explaining instead.
+- **The glossary goes in, not on.** Entries that occur in the sentence fill the model's own
+  terminology template, so it translates them your way rather than being corrected
+  afterwards: `replay buffer` comes out 经验回放缓冲 with the entry and 重放缓冲区 without.
+- **A number guard.** If a number in the English is not in the Chinese as the same number
+  string, the line is retranslated by the local fallback (`opus-mt` for live captions, NLLB
+  otherwise). Same string means 63.8 is not found inside 163.8 and 7 not inside 70; the
+  accepted equivalences are a short tested list — 1,000 = 1000, full-width digits, 3 = 三,
+  1st = 第一, 7 billion = 70亿 — and `7 billion` as 7亿, ten times too small, is refused. If
+  the fallback misses the number too, the Hy-MT2 line is kept, since the fallback is the
+  model that turned 63.8 into 638. A timeout or a crash also falls back, so a caption never
+  goes empty.
+
+Five sentences `opus-mt` mistranslated in the candidate comparison
+(`scripts/eval-mt-candidates.mjs`), one built around numbers and one everyday control all
+come out right, numbers included, even on the CPU alone (1.1–3.2 s a sentence for 7B,
+0.4–1.0 s for 1.8B). On the GPU it is faster than `opus-mt` — see the benchmark above.
+
 ### Glossary starter packs, and three ways a glossary makes text worse
 
 The glossary rewrites the translator's known wrong renderings of a term with yours. It
@@ -307,7 +392,7 @@ Requires Node 22+ (for `node:sqlite`) and Windows for the desktop app.
 npm install
 npm run data              # ~800 MB of corpora → data/dict.db (1,260 MB)
 npm start                 # dictionary only at this point
-npm test                  # 270 tests; without data/dict.db, 186 run and the rest skip
+npm test                  # 329 tests; without data/dict.db, 239 run and the rest skip
 ```
 
 The dictionary works after that. **Captioning and translation are separate downloads**,
@@ -316,7 +401,16 @@ and without them the lecture view has nothing to run:
 ```bash
 npm run fetch:asr         # whisper.cpp runtime + base model, ~90 MB
 npm run fetch:asr -- --all   # also the fast and high-accuracy models, ~330 MB
+npm run fetch:asr -- --cuda  # the same whisper.cpp build for CUDA 12.4, 643 MB
 npm run fetch:model      # opus-mt-en-zh, 118 MB — for the translation pane
+npm run fetch:mt:hymt    # Hy-MT2-7B (4.6 GB) + llama.cpp's CUDA build — wants a GPU
+```
+
+The public benchmark is two more commands, about two hours each run:
+
+```bash
+npm run fetch:bench       # the 21 MCIF talks, 217 MB, every file sha256-checked
+npm run bench -- --mt hymt7b --asr-bin data/asr-cuda
 ```
 
 `npm run data` is a one-time cost, and after it — plus `npm install`, plus the captioning
@@ -332,12 +426,14 @@ For Android: `npm run build:db:mobile` (a 383 MB slim database), then `npm run a
 ```
 src/main/        electron main process — app-core (shared with Android), dict-db,
                  text-keys, asr, lecture, vad-chunker, glossary + glossary-packs,
-                 translate + translate-online, sentence-split, word-at,
-                 transcript-search, quiz, user-db, selection (Windows UI
-                 Automation), self-test (npm run shot)
+                 translate + translate-online + hymt + llama-server + number-guard,
+                 sentence-split, word-at, transcript-search, quiz, user-db,
+                 selection (Windows UI Automation), self-test (npm run shot),
+                 bench (LEXICA_BENCH)
 src/renderer/    the UI, shared verbatim with Android
 scripts/         corpus download, database build, mobile slim build, APK build,
-                 MT and ASR model evaluation harnesses
+                 MT and ASR model evaluation harnesses, the public benchmark
+                 (fetch-bench, bench-stream, bench-score.py)
 android/         Kotlin host + generated www assets
 test/            node:test, no network. Suites that need data/dict.db (from
                  npm run data) skip on a fresh clone
@@ -348,8 +444,9 @@ test/            node:test, no network. Suites that need data/dict.db (from
 The desktop app is what I use daily. The Android build runs on a physical device — the
 SQLite PRAGMA note linked above came out of its first launch on one.
 
-The captioning numbers (0.58× → 4.0×, 0.8% WER) come from my own measurements on my own
-hardware and lecture recordings, not from a public benchmark.
+The 0.58× → 4.0× and 0.8% WER figures come from my own hardware and a synthetic clip. The
+[MCIF table](#on-a-public-benchmark) is the public-benchmark measurement, on the hardware
+listed under it.
 
 Dictionary data is redistributed under the licences of the upstream corpora; the
 build scripts fetch them rather than vendoring them here.
