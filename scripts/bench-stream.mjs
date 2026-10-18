@@ -20,6 +20,8 @@
  *   --title <课程名>    每场的课程名，会拼进识别提示词；默认 ACL research talk
  *   --llama-dir <dir>   llama-server.exe 所在目录（等同 LEXICA_LLAMA_DIR）
  *   --data <dir>        别的测试集整理好的目录（结构同 fetch-bench.mjs 的 prepared/）
+ *   --cpu-only          对应用藏起显卡（CUDA_VISIBLE_DEVICES=-1）：llama-server 退回 CPU，
+ *                       量「没有独显的机器」上的表现。CUDA 版的 whisper 也会退回 CPU
  *   --allow-shared-gpu  显卡上已经有别的计算进程时照样跑（默认拒绝：别人的时延会被我们拖慢，
  *                       我们的也会被别人拖慢）
  */
@@ -44,8 +46,10 @@ const llamaDir = arg('--llama-dir', process.env.LEXICA_LLAMA_DIR || null);
 const speed = Number(arg('--speed', '1'));
 const nTalks = arg('--talks') ? Number(arg('--talks')) : null;
 const rolling = !flag('--no-rolling');
+const cpuOnly = flag('--cpu-only');
 const asrTag = asrBin ? path.basename(path.resolve(asrBin)) : 'cpu';
-const name = arg('--name', `${mt}-${asrTag}${rolling ? '' : '-norolling'}${speed !== 1 ? `-x${speed}` : ''}`);
+const name = arg('--name', `${mt}-${asrTag}${cpuOnly ? '-cpuonly' : ''}`
+  + `${rolling ? '' : '-norolling'}${speed !== 1 ? `-x${speed}` : ''}`);
 const outDir = path.join(ROOT, 'dist', 'bench', name);
 
 const talksFile = path.join(PREPARED, 'talks.json');
@@ -94,7 +98,7 @@ function gpuName() {
    多半是 CUDA 版。用的话先看一眼，显卡在忙就停——别人的时延会被我们拖慢，
    我们的也会被别人拖慢。判据是占用率和显存，不是进程列表（理由见 computeLike）。
    空闲时本机桌面程序常驻约 2.5GB 显存、占用率个位数。 */
-const usesGpu = mt.startsWith('hymt') || !!asrBin;
+const usesGpu = !cpuOnly && (mt.startsWith('hymt') || !!asrBin);
 const BUSY = { util: 20, mem: 4500 };
 if (usesGpu) {
   const g = gpuNow();
@@ -139,6 +143,7 @@ fs.writeFileSync(path.join(outDir, 'machine.json'), `${JSON.stringify({
   llamaDir: llamaDir ? path.resolve(llamaDir) : null,
   speed,
   rolling,
+  cpuOnly,
   cpu: os.cpus()[0]?.model,
   cores: os.cpus().length,
   ramGB: +(os.totalmem() / 2 ** 30).toFixed(1),
@@ -175,6 +180,8 @@ const child = spawn(electron, [ROOT], {
     LEXICA_BENCH: planPath,
     ...(llamaDir ? { LEXICA_LLAMA_DIR: path.resolve(llamaDir) } : {}),
     ...(asrBin ? { LEXICA_ASR_BIN: path.resolve(asrBin) } : {}),
+    // 只能写 -1：设成空串时 CUDA 照样看得见显卡
+    ...(cpuOnly ? { CUDA_VISIBLE_DEVICES: '-1' } : {}),
   },
 });
 const relay = (d) => {
