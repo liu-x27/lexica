@@ -607,11 +607,14 @@
           }
           ${
             (stats.mtModels || []).length > 1
-              ? row('翻译模型', `两个都装了，可以随时切。opus 快但会把数字改错
-                  （实测 63.8 → 638）；NLLB 慢三四倍，数字准、术语明显更好。<br>
+              ? row('翻译模型', `装了的都能随时切。opus 快但会把数字改错
+                  （实测 63.8 → 638）；NLLB 慢三四倍，数字准、术语明显更好。
+                  ${stats.mtModels.some((m) => m.key.startsWith('hymt'))
+                    ? 'Hy-MT2 要显卡：公开基准上比 opus 准一截还更快，数字对不上原文的句子会换兜底模型重译。'
+                    : ''}<br>
                   <span class="faint">这一项管查词与翻译页。实时字幕另有一项设置，
                   在下面——那里别用 NLLB，它会和识别引擎抢 CPU。</span>`,
-                  `<div class="seg">${stats.mtModels.map((m) => `
+                  `<div class="seg seg-models">${stats.mtModels.map((m) => `
                     <button class="seg-btn ${(s.mtModel || 'opus') === m.key ? 'is-on' : ''}"
                             data-act="mt-model" data-v="${m.key}" title="${esc(m.note)}">
                       ${esc(m.label)}</button>`).join('')}</div>`)
@@ -626,9 +629,12 @@
           ${
             (stats.mtModels || []).length > 1
               ? row('字幕翻译模型', `实时字幕单独用一个更快的。实测 NLLB 和识别引擎会抢 CPU，
-                  两边一起变慢（一节课只识别出四分之一），所以这里默认用快的。<br>
+                  两边一起变慢（一节课只识别出四分之一），所以这里默认用快的。
+                  ${stats.mtModels.some((m) => m.key === 'hymt7b')
+                    ? '有显卡就选 Hy-MT2-7B：它在显卡上跑，不和识别抢 CPU，实测一句比 opus 还快。'
+                    : ''}<br>
                   <span class="faint">转写文件里留着英文原文，课后想要更准的译文可以在翻译页重译。</span>`,
-                  `<div class="seg">${stats.mtModels.map((m) => `
+                  `<div class="seg seg-models">${stats.mtModels.map((m) => `
                     <button class="seg-btn ${(s.lectureMtModel || 'opus') === m.key ? 'is-on' : ''}"
                             data-act="lec-mt-model" data-v="${m.key}">${esc(m.label)}</button>`).join('')}</div>`)
               : ''

@@ -696,6 +696,10 @@
   color: var(--ink);
   box-shadow: var(--shadow-sm);
 }
+/* 翻译模型的选择器：装全了有四个、标签又长。不封顶的话它按一行排开的宽度占位，
+   左边的说明文字被挤成一两个字宽的一长条。封在六成左右，按钮两两一行；
+   封到 56% 时两个最长的标签并排差几个像素，就成了一个一行、右对齐的一长串。 */
+.seg.seg-models { flex-wrap: wrap; height: auto; max-width: 62%; }
 
 .goal-num {
   min-width: 34px;

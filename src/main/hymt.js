@@ -18,7 +18,8 @@ const HYMT_MODELS = {
     backend: 'llama',
     repo: 'tencent/Hy-MT2-7B-GGUF',
     file: 'Hy-MT2-7B-Q4_K_M.gguf',          // 4,624,648,896 字节
-    label: 'Hy-MT2-7B（大模型，要显卡）',
+    /* 标签要短：设置页里四个模型两两一行，长了就各占一行（截图 08b 核过） */
+    label: 'Hy-MT2-7B（要显卡）',
     note: '腾讯的翻译专用模型。数字有守卫，术语表直接喂给它。没有独显也能跑，但一句要好几秒。',
   },
   hymt18b: {
@@ -27,7 +28,7 @@ const HYMT_MODELS = {
     /* 1.8B 用 Q8_0 而不是 Q4_K_M：论文表 5 里 Q4 让 1.8B 的指令遵循（IFMTB）从 69.4
        掉到 63.5，术语模板正靠这个；1.9GB 也不算大。 */
     file: 'Hy-MT2-1.8B-Q8_0.gguf',          // 1,908,528,192 字节
-    label: 'Hy-MT2-1.8B（小一号）',
+    label: 'Hy-MT2-1.8B（1.9GB）',
     note: '同一系列的小模型，显存和速度都省得多。',
   },
 };

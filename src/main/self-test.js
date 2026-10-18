@@ -248,6 +248,10 @@ async function runShotSequence(dir, host) {
 
   await view('settings');
   await shot('08-settings-paper');
+  /* 翻译模型那两排：装了 Hy-MT2 之后有四个选项、标签又长，最容易把这一行挤破。
+     只装了一个模型时这一排不出现，scrollTo 找不到会照实说一声。 */
+  await scrollTo('[data-act="mt-model"]');
+  await shot('08b-settings-models');
 
   await view('dict');
   host.mainWin.webContents.send('nav:lookup', { word: 'recieve' });
