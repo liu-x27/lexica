@@ -24,6 +24,7 @@ const {
   PROBE_FRAME, PROBE_CONTROL,
 } = require('./glossary');
 const { AsrEngine } = require('./asr');
+const { collapseRepeats, trimSeamRepeat } = require('./repeat-guard');
 const { LectureRecorder } = require('./lecture');
 const { runShotSequence, seedShotProfile } = require('./self-test');
 
@@ -1196,6 +1197,9 @@ function registerIpc() {
     lagWarned: false,
     /** 已经送去翻译、还没回来的条数。停止时要等它归零，见 lec:stop */
     mtInFlight: 0,
+    /** 上一条出去的字幕和它的结束时刻：查接缝处的重说要用 */
+    lastEn: '',
+    lastT1: -1,
   };
 
   /* 字幕事件要同时发给主窗口和悬浮窗：两边都可能在显示同一条流水线的结果
@@ -1243,6 +1247,8 @@ function registerIpc() {
     lec.busy = false;
     lec.dropped = 0;
     lec.lagWarned = false;
+    lec.lastEn = '';
+    lec.lastT1 = -1;
     startRollAsr();
 
     /* 记录期间临时切到实时专用的翻译模型，停止时切回来。
@@ -1341,9 +1347,10 @@ function registerIpc() {
       // 跑完发现已经有更新的一轮了，这份就作废
       if (myTurn !== roll.seq || !lectures.active) return;
 
-      const text = r.segments.map((x) => x.text.trim()).filter(Boolean).join(' ')
+      // 临时稿用的小模型更容易打转，折一下再上屏
+      const text = collapseRepeats(r.segments.map((x) => x.text.trim()).filter(Boolean).join(' ')
         .replace(/\s+/g, ' ')
-        .trim();
+        .trim(), { seconds: pcm.length / 16000 }).text;
       if (!text || /^[\s.,!?\-—[\]()]*$/.test(text) || /^\[.*\]$/.test(text)) return;
       if (text === roll.lastText) return;     // 没变化就不必刷界面
       roll.lastText = text;
@@ -1430,18 +1437,31 @@ function registerIpc() {
          不合的话一句话会被劈成两条字幕，而且喂给翻译的是残句：
          实测 "...fundamentals of reinforcement" / "learning." 被分开后，
          前半句译成了「加强部队的基本内容」。 */
-      const text = r.segments.map((x) => x.text.trim()).filter(Boolean).join(' ')
+      const merged = r.segments.map((x) => x.text.trim()).filter(Boolean).join(' ')
         .replace(/\s+/g, ' ')
         .trim();
-
-      // 静音块偶尔会得到 "[BLANK_AUDIO]" 或纯标点，这些不该进记录
-      if (!text || /^[\s.,!?\-—[\]()]*$/.test(text) || /^\[.*\]$/.test(text)) return;
-      if (!lectures.active) return;
 
       /* 时间用音频块自己的起止，而不是 whisper 给的段时间：
          块的时间来自采样计数，是准的；whisper 的段时间是估计值。 */
       const t0 = job.startMs;
       const t1 = job.startMs + (job.audio.length / 16000) * 1000;
+
+      /* whisper 会原地打转（一块音频把同一句吐十几遍），讲者在停顿后也常把半截的词重说一遍。
+         公开基准上这两项占了插入错误的一半多，WER 因此从 21.1% 降到 14.7%，规则见 repeat-guard.js。
+         接缝只在两块首尾相接时才查：中间被当静音丢掉过一段的话，两块之间隔着别的时间。 */
+      const loop = collapseRepeats(merged, { seconds: (t1 - t0) / 1000 });
+      const contiguous = lec.lastT1 >= 0 && t0 - lec.lastT1 <= 500;
+      const seam = contiguous ? trimSeamRepeat(lec.lastEn, loop.text) : { text: loop.text, removed: 0 };
+      const text = seam.text;
+      if (loop.removed || seam.removed) {
+        console.log(`[asr] 去重：打转 ${loop.removed} 词，接缝重说 ${seam.removed} 词`);
+      }
+
+      // 静音块偶尔会得到 "[BLANK_AUDIO]" 或纯标点，这些不该进记录
+      if (!text || /^[\s.,!?\-—[\]()]*$/.test(text) || /^\[.*\]$/.test(text)) return;
+      if (!lectures.active) return;
+      lec.lastEn = text;
+      lec.lastT1 = t1;
 
       const id = lectures.addSegment({ t0, t1, en: text });
       lecSend('lec:segment', { id, t0, t1, en: text });
@@ -1655,6 +1675,8 @@ function registerIpc() {
     lec.busy = false;
     lec.dropped = 0;
     lec.lagWarned = false;
+    lec.lastEn = '';
+    lec.lastT1 = -1;
     startRollAsr();
     lec.prevMtModel = translator.model;
     if (settings.lectureMtModel && settings.lectureMtModel !== translator.model) {

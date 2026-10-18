@@ -249,7 +249,10 @@ class VadChunker {
     const endMs = ((this.baseSamples + want) / this.rate) * 1000;
 
     /* 下一段往前借一点音频：切点落在静音里，但句首的爆破音
-       常常正好压在门限附近，不留余量会被削掉。 */
+       常常正好压在门限附近，不留余量会被削掉。
+       代价是上一个词的尾巴也落进来，下一块开头偶尔把它再转一遍（"…we are facing the" / "Facing the problem…"）。
+       这个在 repeat-guard.js 的 trimSeamRepeat 里按文字去掉；把这 120 毫秒剪掉重新识别反而更糟，
+       残留的半个音节会被听成别的词（公开基准上实测 "To count" → "Account"）。 */
     const head = Math.min(this.headSamples, want);
     if (head > 0) {
       /* 必须 slice 出一份拷贝，不能用 subarray：吐出去的这段会被

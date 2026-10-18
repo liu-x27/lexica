@@ -12,6 +12,7 @@
  * Zira / David 重新合成出来的字节对不上，所以音频本身入库，换机器也是同一段。
  *
  * 每个配置起一个独立的 whisper-server，所有配置共用同一批 VAD 分段。
+ * 识别结果过一遍和应用里一样的去重（repeat-guard.js），量的是落盘的那份；去重删了词会在行尾标出来。
  * 各配置的转写结果写到 dist/asr-quality/，方便逐句看错在哪。
  *
  * 换 whisper.cpp 构建（比如 CUDA 版）时用这几个参数核对：
@@ -34,6 +35,7 @@ const WAV = path.join(ROOT, 'scripts', 'fixtures', 'lecture.wav');
 const PORT = 8802;
 const require = createRequire(import.meta.url);
 const { VadChunker } = require('../src/main/vad-chunker.js');
+const { collapseRepeats, trimSeamRepeat } = require('../src/main/repeat-guard.js');
 
 const argv = process.argv.slice(2);
 const arg = (k) => (argv.includes(k) ? argv[argv.indexOf(k) + 1] : null);
@@ -233,13 +235,21 @@ for (const cfg of ONLY_CONFIGS) {
     const texts = [];
     let total = 0;
     let slowest = 0;
+    let guarded = 0;
+    let prev = { text: '', endMs: -1 };
     for (const c of chunks) {
       const t = Date.now();
       const r = await post(wrapWav(c.pcm, rate));
       const ms = Date.now() - t;
       total += ms;
       slowest = Math.max(slowest, ms);
-      texts.push(String(r.text || '').trim());
+      // 和 drainLecture 一样：先折打转，首尾相接的两块再查接缝处的重说
+      const loop = collapseRepeats(String(r.text || '').trim(), { seconds: c.pcm.length / rate });
+      const seam = prev.endMs >= 0 && c.startMs - prev.endMs <= 500
+        ? trimSeamRepeat(prev.text, loop.text) : { text: loop.text, removed: 0 };
+      guarded += loop.removed + seam.removed;
+      if (seam.text) prev = { text: seam.text, endMs: c.endMs };
+      texts.push(seam.text);
     }
     const hyp = texts.join(' ');
     const w = wer(REF, hyp);
@@ -247,7 +257,8 @@ for (const cfg of ONLY_CONFIGS) {
     const ok = slowest < MAXSEC * 1000 ? (rtf > 2 ? '✓ 有余量' : '△ 勉强') : '✗ 跟不上';
     console.log(`  ${cfg.name.padEnd(26)} ${(w.wer * 100).toFixed(1).padStart(5)}%  `
               + `${String(w.errs).padStart(4)}   ${String(slowest).padStart(5)}ms  `
-              + `${rtf.toFixed(2).padStart(7)}x  ${ok}  ${backendOf(log)}`);
+              + `${rtf.toFixed(2).padStart(7)}x  ${ok}  ${backendOf(log)}`
+              + `${guarded ? `  去重删了 ${guarded} 词` : ''}`);
     fs.writeFileSync(path.join(OUT, fileOf(cfg)), hyp, 'utf8');
     // 最后再存一次日志：识别过程中打的（显存分配之类）也要留下
     fs.writeFileSync(path.join(OUT, fileOf(cfg).replace(/\.txt$/, '.server.log')), log, 'utf8');
