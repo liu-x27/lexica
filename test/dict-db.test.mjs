@@ -19,11 +19,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DB_FILE = path.join(ROOT, 'data', 'dict.db');
-const { DictDB, isSentence } = require(path.join(ROOT, 'src', 'main', 'dict-db.js'));
+const { DictDB, isSentence, TERM_STOP } = require(path.join(ROOT, 'src', 'main', 'dict-db.js'));
 
 /* splitSentences 原先在 translate.js 里、顶上 require('electron')，测试只能把源码按文本
    切出来再 new Function——文件结构一变就断。现在它有了自己的纯模块，直接 require。 */
@@ -107,6 +108,96 @@ describe('DictDB', { skip }, () => {
       );
       assert.match(byWord.get('photosynthesis') || '', /光合作用/);
       assert.match(byWord.get('glucose') || '', /葡萄糖/);
+    });
+
+    /* 多词以前只查 words 表，terms 表一次都没查过：large language model 在 terms 里
+       有「大型语言模型」、words 里没有，字幕和整段翻译旁的术语列表就一直缺这一条。 */
+    test('termsIn 也查维基术语表，复数先还原成单数', () => {
+      const terms = db.termsIn('Large language models are trained with gradient descent.');
+      const llm = terms.find((t) => t.surface === 'Large language models');
+      assert.ok(llm, `缺少只在 terms 表里的术语：${terms.map((t) => t.surface).join(' / ')}`);
+      assert.match(llm.brief, /大型语言模型/);
+      assert.equal(llm.lemma, 'large language model');
+      assert.equal(db.lookup(llm.word).status, 'ok', '点进去要查得到');
+      assert.ok(terms.some((t) => t.surface === 'gradient descent'), 'words 里有的照旧');
+    });
+
+    test('termsIn 从维基术语表来的词组不收片名歌名', () => {
+      // 三个都在 terms 表里：前两个是片名，nothing fails 是歌名
+      const got = db.termsIn('The judge said all I want is that nothing fails.').map((t) => t.surface.toLowerCase());
+      for (const g of ['the judge', 'all i want', 'nothing fails']) {
+        assert.ok(!got.includes(g), `混进了片名歌名：${got.join(' / ')}`);
+      }
+      // 原文照标题大写时，说的就是那首歌
+      const song = db.termsIn('She sang Nothing Fails last night.').map((t) => t.surface);
+      assert.ok(song.includes('Nothing Fails'), `大写的歌名该认出来：${song.join(' / ')}`);
+    });
+  });
+
+  /* 对账：按 rowid 从 terms 表里均匀抽一批多词标题，降噪规则放过的 termsIn 都要认出来，
+     拦下的都不认。terms 表没被查的时候，第一条会整批落空。 */
+  describe('维基术语对账', () => {
+    let raw;
+    before(() => { raw = new DatabaseSync(DB_FILE, { readOnly: true }); });
+    after(() => raw?.close());
+
+    /** 2–4 个纯字母词、words 里没有带维基条目的同名词组。text 是标题原样（去掉括号限定） */
+    function sample(every) {
+      const wikiWord = raw.prepare('SELECT 1 FROM words WHERE wkey = ? AND wiki = 1 LIMIT 1');
+      return raw.prepare(`SELECT en_key, en FROM terms WHERE en_key LIKE '% %' AND rowid % ${every} = 0`).all()
+        .map((r) => ({ key: r.en_key, text: r.en.replace(/\s*\([^)]*\)$/, '') }))
+        .filter((r) => {
+          const w = r.key.split(' ');
+          return w.length <= 4 && w.every((x) => /^[a-z]+$/.test(x))
+            && r.text.toLowerCase() === r.key && !wikiWord.get(r.key);
+        });
+    }
+    const edgeIsStop = (key) => {
+      const w = key.split(' ');
+      return TERM_STOP.has(w[0]) || TERM_STOP.has(w[w.length - 1]);
+    };
+    const titleCased = (text) => / [A-Z]/.test(text);
+    const whole = (text) => db.termsIn(text).find((t) => t.at === 0 && t.surface === text);
+
+    test('首尾不是功能词的都抽得出来，带着 terms 里的译名', () => {
+      const rows = sample(997).filter((r) => !edgeIsStop(r.key));
+      assert.ok(rows.length > 200, `只抽到 ${rows.length} 条，样本太少`);
+      const missed = rows.filter((r) => !whole(r.text)?.brief).map((r) => r.text);
+      assert.deepEqual(missed.slice(0, 5), [], `${missed.length}/${rows.length} 条没抽出来`);
+    });
+
+    test('末词变复数照样抽得出来', () => {
+      const plural = raw.prepare("SELECT form FROM forms WHERE lemma = ? AND kind = 's' AND form != lemma LIMIT 1");
+      const texts = [];
+      for (const r of sample(997).filter((x) => !edgeIsStop(x.key))) {
+        const w = r.text.split(' ');
+        const last = w[w.length - 1];
+        let p = plural.get(last.toLowerCase())?.form;
+        if (!p || !/^[a-z]+$/.test(p) || TERM_STOP.has(p)) continue;
+        if (/^[A-Z]/.test(last)) p = p[0].toUpperCase() + p.slice(1);
+        texts.push([...w.slice(0, -1), p].join(' '));
+      }
+      assert.ok(texts.length > 100, `只凑出 ${texts.length} 条，样本太少`);
+      const missed = texts.filter((t) => !whole(t));
+      assert.deepEqual(missed.slice(0, 5), [], `${missed.length}/${texts.length} 条复数没抽出来`);
+    });
+
+    test('首尾是功能词的不从 terms 表收', () => {
+      // 这一类多是 The Private Eyes、Raymond To 这样的片名人名
+      const rows = sample(97).filter((r) => edgeIsStop(r.key));
+      assert.ok(rows.length > 30, `只抽到 ${rows.length} 条，样本太少`);
+      const leaked = rows.filter((r) => whole(r.text)).map((r) => r.text);
+      assert.deepEqual(leaked.slice(0, 5), []);
+    });
+
+    test('只有逐词大写标题的，原文小写就不收', () => {
+      // Fukuoka Prefecture、Gulf of Maine：原文照样大写时第一条已经认过
+      const titles = raw.prepare('SELECT en FROM terms WHERE en_key = ?');
+      const rows = sample(997).filter((r) => !edgeIsStop(r.key) && titleCased(r.text)
+        && titles.all(r.key).every((t) => titleCased(t.en.replace(/\s*\([^)]*\)$/, ''))));
+      assert.ok(rows.length > 100, `只抽到 ${rows.length} 条，样本太少`);
+      const leaked = rows.filter((r) => whole(r.key)).map((r) => r.key);
+      assert.deepEqual(leaked.slice(0, 5), []);
     });
   });
 

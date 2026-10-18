@@ -224,6 +224,19 @@ function wordsOf(text) {
 }
 
 /**
+ * 维基标题和原文的大小写对不对得上。
+ *
+ * 维基的概念条目用句子大小写（Support vector machine），只有专名和作品名才逐词大写
+ * （Nothing Fails 是首歌）。逐词大写的标题，原文也得照样大写才算——小写的
+ * nothing fails 是句普通的话。首词不比：维基标题的首字母一律大写。
+ */
+function casingFits(title, surface) {
+  const words = String(title).replace(/\s*\([^)]*\)\s*$/, '').split(/\s+/);
+  if (words.length !== surface.length) return true;
+  return words.every((w, k) => k === 0 || !/^[A-Z]/.test(w) || /^[A-Z]/.test(surface[k]));
+}
+
+/**
  * 判断输入该按「句子」还是「词条 / 词组」处理。
  *
  * 分界不需要很精确：判成句子时仍然会附上拆词结果，判成词组时该有的
@@ -947,8 +960,9 @@ class DictDB {
    * 译文看结构，这份列表看术语。
    *
    * 三条降噪规则，都是照着实测结果定的：
-   *   - 多词术语必须 wiki=1。不加这条的话 "a form of"、"form of" 这类
-   *     ECDICT 收录的功能词组合会把列表淹掉。
+   *   - 多词术语必须有维基条目。不加这条的话 "a form of"、"form of" 这类
+   *     ECDICT 收录的功能词组合会把列表淹掉。先看 words 里的 wiki=1，没有再查
+   *     terms 表（large language model 只在 terms 里），见 _wikiPhrase。
    *   - 单词先做词形还原再判罕见度。improving / stored 自己有独立词条，
    *     不还原的话会冒出「有启发的」「储存的」这种既噪音又误导的结果。
    *   - 只留罕见词（bnc/frq 在 4000 名以后）。常用词不需要在这里重复解释。
@@ -975,10 +989,19 @@ class DictDB {
 
         let row = null;
         let lemma = null;
+        let terms = null;
 
         if (n > 1) {
           const r = this.q.exact.get(gram);
           if (r && r.wiki) row = r;
+          else {
+            const hit = this._wikiPhrase(lower.slice(i, i + n), toks.slice(i, i + n));
+            if (hit) {
+              row = hit.row || null;
+              terms = hit.terms || null;
+              if (hit.key !== gram) lemma = row ? row.word : hit.key;
+            }
+          }
         } else {
           if (TERM_STOP.has(gram) || gram.length < 3) continue;
           const hit = this._resolveTerm(gram);
@@ -988,8 +1011,24 @@ class DictDB {
           }
         }
 
-        if (!row) continue;
+        if (!row && !terms) continue;
         for (let k = i; k < i + n; k++) claimed[k] = true;
+        if (terms) {
+          // 只有维基标题，没有词库条目：译名就是标题对，点进去走 lookup 的维基术语分支
+          out.push({
+            at: i,
+            surface: toks.slice(i, i + n).join(' '),
+            word: lemma || gram,
+            lemma,
+            phonetic: null,
+            brief: [...new Set(terms.map((t) => t.zh))].slice(0, 2).join('；').slice(0, 60),
+            tags: [],
+            collins: 0,
+            oxford: false,
+            wiki: true,
+          });
+          continue;
+        }
         out.push({
           at: i,
           surface: toks.slice(i, i + n).join(' '),
@@ -1007,6 +1046,41 @@ class DictDB {
 
     // 按在句中出现的顺序给，读的时候能对着原文走
     return out.sort((a, b) => a.at - b.at).slice(0, limit);
+  }
+
+  /**
+   * words 里没有带维基条目的词组时，到 terms 表里找。
+   *
+   * terms 是中文维基全部的跨语言标题，large language model、convolutional neural
+   * network 这类新术语只在这里有。查之前先把末词还原成单数再多查一遍——维基标题是
+   * 单数，句子里多半是复数（large language models）。
+   *
+   * 维基标题里也有片名歌名（The Judge、All I Want），这是 words 的 wiki=1 用不着管、
+   * 这里要管的：ECDICT 先替那边筛过一遍。所以首词或末词是功能词的不查，逐词大写的
+   * 标题要原文也大写（casingFits）。实测几份英文 README 和一段讲课稿，首尾这条拦下的
+   * （the judge、the call、all I want、the tables……）没有一个是术语。
+   *
+   * @param words 小写的词
+   * @param surface 原文里的词（大小写不动）
+   * @returns {{key: string, row?: object, terms?: Array<{en, zh}>} | null}
+   *   key 是真正命中的键，做过单数还原时和原文不同
+   */
+  _wikiPhrase(words, surface) {
+    if (TERM_STOP.has(words[0]) || TERM_STOP.has(words[words.length - 1])) return null;
+    const gram = words.join(' ');
+    const keys = [gram];
+    for (const f of this.q.lemmaOf.all(words[words.length - 1])) {
+      if (f.kind === 's') keys.push([...words.slice(0, -1), f.lemma].join(' '));
+    }
+    for (const key of new Set(keys)) {
+      if (key !== gram) {
+        const r = this.q.exact.get(key);
+        if (r && r.wiki) return { key, row: r };
+      }
+      const terms = this._terms(key).filter((t) => casingFits(t.en, surface));
+      if (terms.length) return { key, terms };
+    }
+    return null;
   }
 
   /** 单词还原到原形。自己有词条也要看是不是某个词的变形（improving → improve） */
@@ -1365,7 +1439,7 @@ class DictDB {
 const exported = {
   DictDB, POS_NAMES, TAG_LABELS,
   parseTranslation, parsePhonetic, setDatabaseOpener,
-  isSentence, wordsOf,
+  isSentence, wordsOf, TERM_STOP,
 };
 
 /* 同一份文件要在两个环境里用：

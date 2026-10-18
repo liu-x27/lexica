@@ -296,15 +296,17 @@ npm run fetch:model
 
 用 n-gram（4 词到 1 词）查词库，长术语优先，命中后占位避免重复。三条降噪规则都是照实测定的：
 
-- **多词术语必须 `wiki=1`**。不加这条，ECDICT 收的 `a form of`、`form of`
-  这类功能词组合会把列表淹掉
+- **多词术语必须有维基条目**：words 里 `wiki=1` 的词组，或者 terms 表里的维基标题
+  （末词先还原成单数，`large language models` 照样认得）。不加这条，ECDICT 收的
+  `a form of`、`form of` 这类功能词组合会把列表淹掉。terms 表里还有片名歌名
+  （`The Judge`、`All I Want`），所以从那里来的词组首尾不能是功能词，逐词大写的标题要原文也大写
 - **单词先做词形还原再判罕见度**。`improving` 自己有词条（释义是「有启发的」），
   不还原就会冒出既噪音又误导的结果
 - **只留罕见词**（bnc/frq 在 4000 名以后）。常用词不需要在这里重复解释
 
 科学类句子效果很好（`adenosine triphosphate → 三磷酸腺苷`、`oxidative phosphorylation → 氧化磷酸化`），
-但覆盖有限：2019 年后的术语大量缺失（`large language model`、`in-context learning`、
-`ablation study` 都查不到），且有几个命中了却是错义（`transformer → 变压器`、`dropout → 退学学生`）。
+但覆盖有限：2019 年后的术语不少还缺（`in-context learning`、`ablation study` 都查不到），
+且有几个命中了却是错义（`transformer → 变压器`、`dropout → 退学学生`）。
 要补得刷新 zhwiki 转储。
 
 ### 切句
