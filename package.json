@@ -17,6 +17,7 @@
     "check:bom": "node scripts/check-bom.mjs",
     "fetch:model": "node --no-warnings scripts/fetch-model.mjs",
     "fetch:model:nllb": "node --no-warnings scripts/eval-mt-candidates.mjs --fetch nllb",
+    "fetch:mt:hymt": "node --no-warnings scripts/fetch-mt-hymt.mjs",
     "fetch:asr": "node --no-warnings scripts/fetch-asr.mjs",
     "eval:mt:all": "node --no-warnings scripts/eval-mt-candidates.mjs --run",
     "eval:mt": "node --no-warnings scripts/eval-mt.mjs",

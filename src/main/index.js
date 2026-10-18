@@ -17,7 +17,7 @@ const { createCore, IPC_CHANNELS } = require('./app-core');
 const { Quiz } = require('./quiz');
 const logger = require('./logger');
 const { SelectionWatcher } = require('./selection');
-const { Translator } = require('./translate');
+const { Translator, isLlama } = require('./translate');
 const { OnlineTranslator } = require('./translate-online');
 const {
   matchTerms, applyGlossary, needProbe, cleanProbe, diffMiddle, frameDiffOk,
@@ -865,7 +865,7 @@ function registerIpc() {
    *
    * @param kind live | batch | lookup，只决定超时
    */
-  async function translateRaw(text, kind = 'lookup') {
+  async function translateRaw(text, kind = 'lookup', terms = []) {
     if (online?.available) {
       const r = await online.translate(text, { timeoutMs: ONLINE_TIMEOUT[kind] });
       if (r.ok) return { ok: true, text: r.text, ms: r.ms, via: 'online' };
@@ -875,8 +875,17 @@ function registerIpc() {
     if (!translator?.available) {
       return { ok: false, reason: online?.enabled ? '在线翻译失败，且未安装本地模型' : '未安装翻译模型' };
     }
-    const r = await translator.translate(text);
+    const r = await translator.translate(text, { kind, terms });
     return r?.ok ? { ...r, via: 'local' } : r;
+  }
+
+  /**
+   * 这句英文命中的术语表条目，交给有术语模板的模型（Hy-MT2）在翻译时就照着译。
+   * 其他模型不认它，照旧靠 fixTerms 事后修。
+   */
+  function glossTerms(en) {
+    const rows = glossRows();
+    return rows.length ? matchTerms(en, rows).map((h) => ({ en: h.surface, zh: h.zh })) : [];
   }
 
   /**
@@ -884,9 +893,10 @@ function registerIpc() {
    *
    * 术语表在两条路上都要生效——在线模型也有自己的偏好
    * （replay buffer → 重播缓冲区），用户想统一译名就该管得住它。
+   * 探测错译写法走的是上面的 translateRaw，不带术语：要问的正是模型自己的译法。
    */
   async function translateOne(text, kind = 'lookup') {
-    const r = await translateRaw(text, kind);
+    const r = await translateRaw(text, kind, glossTerms(text));
     return r?.ok ? { ...r, text: fixTerms(text, r.text) } : r;
   }
 
@@ -1115,7 +1125,9 @@ function registerIpc() {
        还挂着「专业术语可能不准」会让人不敢用。 */
     caveat: online?.available
       ? '在线翻译，质量较好；断网会自动退回本地模型'
-      : '本地机器翻译，专业术语与数字可能不准',
+      : (isLlama(translator?.model)
+        ? '本地大模型翻译（Hy-MT2），数字对不上原文的句子已换成兜底模型重译'
+        : '本地机器翻译，专业术语与数字可能不准'),
   }));
 
   ipcMain.handle('mt:translate', async (_e, text) => {
@@ -1156,7 +1168,7 @@ function registerIpc() {
       // 失败就落到下面的本地通道，用户不需要重试
     }
 
-    const r = await translator.translateLong(text, push);
+    const r = await translator.translateLong(text, push, { kind: 'batch', termsFor: glossTerms });
     if (!r?.ok || !r.sentences) return r;
     /* 按句修而不是对整段修：术语表的门槛是「英文原文里出现过」，
        逐句对照才能保证改的是对应那一句，否则 A 句的术语会去改 B 句的字。 */
@@ -1480,11 +1492,13 @@ function registerIpc() {
       const r = await translateOne(text, 'live');
       const mtMs = Date.now() - t0;
       const zh = r && r.ok ? r.text : null;
-      // 记下实际译这一句的通道（在线服务名或本地模型），流水账里要看得出来
+      /* 记下实际译这一句的通道：数字守卫拦下大模型的译文时，这一句是兜底模型译的，
+         流水账里要看得出来。 */
       const mt = mtLabel(r);
       lectures.setTranslation(id, zh, { mt });
       lecSend('lec:translated', { id, zh, reason: r && r.ok ? null : r?.reason });
-      console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词, ${mt || '失败'})`);
+      console.log(`[lat] 翻译 ${mtMs}ms (${text.split(/\s+/).length} 词, ${mt || '失败'}`
+        + `${r?.guard?.missing?.length ? `，数字守卫：${r.guard.missing.join(' ')}` : ''})`);
     } finally {
       lec.mtInFlight -= 1;
     }
@@ -2009,7 +2023,12 @@ app.whenReady().then(() => {
 
   const dataDir = path.dirname(resolveDictPath());
   // 模型和词库放一起：开发时 data/model，打包后 resources/data/model
-  translator = new Translator(path.join(dataDir, 'model'), { model: settings.mtModel });
+  translator = new Translator(path.join(dataDir, 'model'), {
+    model: settings.mtModel,
+    /* llama-server（跑 Hy-MT2）默认在 data/llama，由 npm run fetch:mt:hymt 下载。
+       机器上已经有一份 llama.cpp 的话，可以用 LEXICA_LLAMA_DIR 指过去，不必再下。 */
+    llamaDir: process.env.LEXICA_LLAMA_DIR || path.join(dataDir, 'llama'),
+  });
   online = new OnlineTranslator({
     provider: settings.mtOnlineProvider,
     enabled: !!settings.mtOnline,

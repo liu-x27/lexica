@@ -237,9 +237,10 @@ async function main() {
     else await copyBig(dbSrc, dbDest, 'dict.db');
 
     /* 翻译模型与语音识别组件都是可选的，装了才打包。
-       按目录总字节比对来决定跳不跳——这两个目录加起来能有 1.2GB，
-       每次打包都重新复制太慢。 */
-    for (const [name, label] of [['model', '翻译模型'], ['asr', '语音识别组件']]) {
+       按目录总字节比对来决定跳不跳——这几个目录加起来能有好几 GB
+       （Hy-MT2-7B 的权重一个就 4.6GB），每次打包都重新复制太慢。
+       llama 是跑 Hy-MT2 的 llama-server，没有它 Hy-MT2 在打包版里不会出现。 */
+    for (const [name, label] of [['model', '翻译模型'], ['asr', '语音识别组件'], ['llama', 'llama.cpp 运行时']]) {
       const src = path.join(ROOT, 'data', name);
       if (!fs.existsSync(src)) continue;
       const dest = path.join(TARGET, 'resources', 'data', name);
