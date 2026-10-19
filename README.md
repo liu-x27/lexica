@@ -17,7 +17,7 @@ both run with the network cable pulled out, on Windows and Android from one sour
 ![whisper.cpp](https://img.shields.io/badge/whisper.cpp-live_captions-b3402f?style=flat-square)
 ![Android](https://img.shields.io/badge/Android-same_source_tree-1c1a17?style=flat-square&logo=android&logoColor=white)
 ![No native modules](https://img.shields.io/badge/native_modules-none-1c1a17?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-329-1c1a17?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-355-1c1a17?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1c1a17?style=flat-square)](LICENSE)
 
 **[Project page](https://liu-x27.github.io/lexica/)** · [The dictionary](#the-dictionary) · [Captions](#real-time-captioning) · [Two platforms](#one-source-tree-two-platforms) · [Running it](#running-it) · [中文说明](README.zh-CN.md)
@@ -153,6 +153,7 @@ LongLAAL is the same formula over OmniSTEval's own resegmentation.
 | configuration | WER | BLEU | chrF | LongYAAL CU / CA | Chinese line after chunk end, median / p90 |
 |---|---|---|---|---|---|
 | CPU whisper + `opus-mt` (the old default) | 21.1% | 27.2 | 24.4 | 3.37 / 4.75 s | 1.11 / 1.77 s |
+| CPU whisper + `opus-mt` + repeat guard (the default now) | 14.7% | 29.2 | 24.6 | 3.43 / 4.72 s | 1.05 / 1.66 s |
 | CPU whisper + Hy-MT2-7B on the GPU | 21.1% | 37.8 | 36.0 | 3.30 / 4.56 s | 1.07 / 1.57 s |
 | CUDA whisper + Hy-MT2-7B on the GPU | 20.5% | 38.2 | 36.1 | 3.29 / 3.84 s | 0.36 / 0.75 s |
 | CPU whisper + Hy-MT2-1.8B, no GPU at all | 21.1% | 35.8 | 35.6 | 3.20 / 5.60 s | 1.88 / 3.13 s |
@@ -167,8 +168,10 @@ What it says:
 - **The synthetic clip flattered recognition.** 0.8% WER there, 21.1% here, 51.5% on the
   worst talk. The largest error class is insertions — 2,075 against 1,231 substitutions over
   16,797 reference words. 30 chunks come out at over 4.5 words a second because whisper
-  loops (one 9-second chunk produced 171 words of the same sentence), and the lead-in kept
-  between chunks sometimes gets a boundary word transcribed twice. Collapsing consecutive repeats alone brings WER to 16.6%; that is the next fix.
+  loops (one 9-second chunk produced 171 words, the same sentence 14 times), and after a
+  pause on a function word the next chunk often starts by saying that word again. Captions
+  now go through a [repeat guard](#repetition-loops) first; the second row is the same pipeline
+  with it: 14.7% WER, insertions down from 2,075 to 984, the worst talk from 51.5% to 26.2%.
 - **Hy-MT2-7B is better and faster.** The first two rows share word-identical recognition,
   so the ten BLEU points are the translator alone. On the GPU it also translates a line in a
   median 163 ms against `opus-mt`'s 252 ms on the CPU, which it no longer fights whisper for.
@@ -184,6 +187,33 @@ What it says:
   differ (4.7% of words outside the looping chunks), and on the clip `base` with beam-5 went
   from 6.3% to 12.6% WER — floating-point differences send beam search down other paths.
   The shipped settings never use `base` with beam search.
+
+### Repetition loops
+
+`src/main/repeat-guard.js` runs on every chunk before it is translated, and on rolling
+captions before they are shown. It keeps the first pass of a repeated run and drops the rest.
+whisper.cpp has a guard of its own (re-decode when the last 32 tokens have entropy below 2.4),
+but on the 37 chunks this guard flags, the median entropy is 2.73: 25 sit above 2.4, and 6 more
+are shorter than the 32 tokens that check needs. A word repeated across a seam is dropped only
+when the previous caption stopped mid-sentence, on a function word or without final punctuation.
+
+Real speech repeats itself too, so the shapes that occur in speech need more evidence: three or
+more passes (four for a single word); two passes only if the chunk runs faster than 4 words a
+second, or if a whole sentence of 8+ words came back. The human reference transcripts contain
+real repeats — *"…contains the watermark. The watermark method…"*, and an 8-word one that
+starts mid-sentence — and run through the guard in 2,724 sentence windows at a normal speaking
+rate, they lose nothing. Those sentences are in the tests, half of which are "must keep" cases.
+
+| recognition | WER without → with the guard |
+|---|---|
+| CPU whisper, full benchmark rerun | 21.1% → 14.7% |
+| CUDA whisper, applied to that run's journal | 20.5% → 14.9% |
+| synthetic clip (`npm run eval:asr`), all seven configurations | unchanged, 0.8% for the default |
+
+Two things measured and left out: re-decoding a looping chunk with other settings (no prompt,
+greedy, higher temperature, a higher entropy threshold) gains at most 0.02 points for 0.9–2.3 s
+more per chunk; and cutting the 120 ms lead-in between chunks turns the half syllable left at
+the start into a different word (*"To count"* → *"Account"*), which is worse than a repeat.
 
 ### Where the latency actually goes
 
@@ -392,7 +422,7 @@ Requires Node 22+ (for `node:sqlite`) and Windows for the desktop app.
 npm install
 npm run data              # ~800 MB of corpora → data/dict.db (1,260 MB)
 npm start                 # dictionary only at this point
-npm test                  # 329 tests; without data/dict.db, 239 run and the rest skip
+npm test                  # 355 tests; without data/dict.db, 265 run and the rest skip
 ```
 
 The dictionary works after that. **Captioning and translation are separate downloads**,
@@ -425,7 +455,7 @@ For Android: `npm run build:db:mobile` (a 383 MB slim database), then `npm run a
 
 ```
 src/main/        electron main process — app-core (shared with Android), dict-db,
-                 text-keys, asr, lecture, vad-chunker, glossary + glossary-packs,
+                 text-keys, asr, lecture, vad-chunker, repeat-guard, glossary + glossary-packs,
                  translate + translate-online + hymt + llama-server + number-guard,
                  sentence-split, word-at, transcript-search, quiz, user-db,
                  selection (Windows UI Automation), self-test (npm run shot),
