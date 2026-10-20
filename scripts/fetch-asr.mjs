@@ -8,6 +8,10 @@
  *   node scripts/fetch-asr.mjs --all        三个模型都下
  *   node scripts/fetch-asr.mjs --cuda       另下同一构建的 CUDA 12.4 版（约 643 MB）到 data/asr-cuda/，
  *                                           模型共用 data/asr/models。基准和 eval:asr 用 --asr-bin / --bin 指过去
+ *   node scripts/fetch-asr.mjs --nemo       流式识别：NVIDIA NeMo-Speech.cpp 0.2.0（Apache-2.0）+ Nemotron Speech
+ *                                           Streaming EN 0.6B（NVIDIA Open Model License），到 data/asr-nemo/。
+ *                                           有 NVIDIA 显卡下 CUDA 版运行时（97 MB），没有下 CPU 版（5 MB）；
+ *                                           --nemo-cpu / --nemo-cuda 指定，两个都要就都写。模型 667 MB
  *
  * 为什么用预编译的 exe 而不是 Node 原生模块：本机没有 MSVC，编不了原生模块
  * （见 memory: node-sqlite-instead-of-native）。而 whisper.cpp 官方发布 Windows
@@ -22,7 +26,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { request, proxyUrl, verifyAgainstOrigin } from './lib/http.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -176,9 +180,92 @@ async function fetchCuda() {
   console.log(`  取出 ${picked} 个文件。核对：npm run eval:asr -- --bin data/asr-cuda --against dist/asr-quality/<CPU 那一轮>`);
 }
 
+/* ---- 流式识别：NeMo-Speech.cpp ----
+   运行时是 NVIDIA 官方的 Windows 预编译包（GitHub release，sha256 取自 release API 的 digest）。
+   CUDA 版是 CUDA 13 编的，带 sm_120（50 系）的机器码和 cuBLAS 垫片，不用装 CUDA 工具包，要 580 以上的驱动。
+   模型是 Hugging Face 上 NVIDIA 自己发的 Q8 GGUF，钉在 NeMo-Speech.cpp 0.2.0 的模型索引
+   （models/index.json）指定的那个提交上，sha256 也是索引里的。文件名和 src/main/nemo-asr.js 的 NEMO_MODELS 一致。 */
+const NEMO_DIR = path.join(ROOT, 'data', 'asr-nemo');
+const NEMO_VERSION = 'v0.2.0';
+const NEMO_RUNTIMES = {
+  cuda: { name: 'nemo-speech-0.2.0-windows-x86_64-cuda.zip', bytes: 102183465,
+    sha256: '9ffe5e842c39a7d3211f3b2c3b3aa1bca8c0b2455d96d961ed5f22ec5108f98d' },
+  cpu: { name: 'nemo-speech-0.2.0-windows-x86_64-cpu.zip', bytes: 5528418,
+    sha256: '82c80451086e86194aba9af19f800da77cd66d1c28d993d0efceffd6cdb49bb8' },
+};
+const NEMO_MODEL = {
+  repo: 'nvidia/nemotron-speech-streaming-en-0.6b',
+  revision: 'ebe59e5a817142986528bbbee5dba8db7b38ed50',
+  file: 'nemotron-speech-streaming-en-0.6b.q8_0.gguf',
+  bytes: 699872960,
+  sha256: 'd9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d',
+};
+
+function hasNvidia() {
+  try {
+    execFileSync('nvidia-smi', ['-L'], { stdio: 'ignore', timeout: 8000, windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchNemo(argv) {
+  const { grabVerified } = await import('./lib/fetch-verified.mjs');
+  const picked = ['cuda', 'cpu'].filter((b) => argv.includes(`--nemo-${b}`));
+  const backends = picked.length ? picked : [hasNvidia() ? 'cuda' : 'cpu'];
+  console.log(`下载流式识别：NeMo-Speech.cpp ${NEMO_VERSION}（${backends.join(' + ')} 版）+ Nemotron → ${NEMO_DIR}\n`);
+
+  for (const b of backends) {
+    const z = NEMO_RUNTIMES[b];
+    const dest = path.join(NEMO_DIR, b);
+    if (fs.existsSync(path.join(dest, 'bin', 'nemo-speech.exe'))) {
+      console.log(`  ✓ 已存在  ${b} 版运行时（要重下就先删掉 data/asr-nemo/${b}）`);
+      continue;
+    }
+    const origin = `https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/${NEMO_VERSION}/${z.name}`;
+    const zip = path.join(NEMO_DIR, '.dl', z.name);
+    await grabVerified(MIRRORS.map((m) => m(origin)), zip, { ...z, label: `${z.name}（Apache-2.0）` });
+    const stage = path.join(NEMO_DIR, `.stage-${b}`);
+    await fsp.rm(stage, { recursive: true, force: true });
+    await unzip(zip, stage);
+    // 压缩包里是 nemo-speech-0.2.0-windows-x86_64-<b>/{bin,share,include,lib}，只留运行要的 bin 和许可证所在的 share
+    const [top] = (await fsp.readdir(stage, { withFileTypes: true })).filter((e) => e.isDirectory());
+    if (!top || !fs.existsSync(path.join(stage, top.name, 'bin', 'nemo-speech.exe'))) {
+      throw new Error('解压后找不到 bin/nemo-speech.exe，压缩包结构可能变了');
+    }
+    await fsp.mkdir(dest, { recursive: true });
+    for (const sub of ['bin', 'share']) {
+      await fsp.rename(path.join(stage, top.name, sub), path.join(dest, sub));
+    }
+    await fsp.rm(stage, { recursive: true, force: true });
+    await fsp.rm(zip, { force: true });
+    console.log(`    解压到 data/asr-nemo/${b}（bin/ 和 share/licenses/）`);
+  }
+
+  const m = NEMO_MODEL;
+  await grabVerified([
+    `https://huggingface.co/${m.repo}/resolve/${m.revision}/${m.file}`,
+    `https://hf-mirror.com/${m.repo}/resolve/${m.revision}/${m.file}`,
+  ], path.join(NEMO_DIR, 'models', m.file), { ...m, label: `${m.file}（NVIDIA Open Model License）` });
+
+  // 跑一下，确认 exe 和它那些 dll 能起来
+  for (const b of backends) {
+    const exe = path.join(NEMO_DIR, b, 'bin', 'nemo-speech.exe');
+    try {
+      const v = execFileSync(exe, ['--version'], { encoding: 'utf8', timeout: 30000, windowsHide: true }).trim();
+      console.log(`  ✓ ${b} 版：${v}`);
+    } catch (e) {
+      console.log(`  ✗ ${b} 版起不来：${e.message.split('\n')[0]}`);
+    }
+  }
+  console.log('\n流式识别已就绪。设置 →「实时字幕」→ 识别模型选「流式（Nemotron）」（默认就是它）。');
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--cuda')) return fetchCuda();
+  if (argv.some((a) => a.startsWith('--nemo'))) return fetchNemo(argv);
   const only = argv.includes('--model') ? argv[argv.indexOf('--model') + 1] : null;
   const all = argv.includes('--all');
   const picks = all ? Object.keys(MODELS) : [only && MODELS[only] ? only : 'base'];

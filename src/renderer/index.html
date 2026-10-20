@@ -71,8 +71,7 @@
   <script src="js/ui.js"></script>
   <script src="js/entry-view.js"></script>
   <script src="js/translate-view.js"></script>
-  <!-- 切分器与主进程共用同一份实现，双导出成 window.LexicaVad -->
-  <script src="../main/vad-chunker.js"></script>
+  <!-- 只管采音；切分在主进程（vad-chunker.js 由 index.js 的 feedBlock 用） -->
   <script src="js/audio-source.js"></script>
   <script src="js/lecture-view.js"></script>
   <script src="js/lecture.js"></script>

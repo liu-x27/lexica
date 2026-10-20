@@ -40,12 +40,13 @@ const { EventEmitter } = require('node:events');
 
 /** 识别模型档位。key 与设置项 asrModel 对应 */
 const ASR_MODELS = {
-  tiny: { file: 'ggml-tiny.en-q5_1.bin', label: '最快（tiny）', realtime: true, beam: 1 },
-  base: { file: 'ggml-base.en-q5_1.bin', label: '均衡（base）', realtime: true, beam: 1 },
-  /* small 也能实时：9 倍余量、WER 0.8%。
+  tiny: { file: 'ggml-tiny.en-q5_1.bin', label: 'whisper tiny', realtime: true, beam: 1 },
+  base: { file: 'ggml-base.en-q5_1.bin', label: 'whisper base', realtime: true, beam: 1 },
+  /* small 也能实时：9 倍余量、WER 0.8%（合成音频）。
      beam search 只在 small 上有正收益（1.6% → 0.8%），base 上反而变差（4.7% → 6.3%），
-     所以每档各自带自己的 beam 设置。 */
-  small: { file: 'ggml-small.en-q5_1.bin', label: '最准（small，推荐）', realtime: true, beam: 5 },
+     所以每档各自带自己的 beam 设置。
+     流式的 Nemotron 装了的话默认用它（nemo-asr.js），这三档是没装时的退路。 */
+  small: { file: 'ggml-small.en-q5_1.bin', label: 'whisper small', realtime: true, beam: 5 },
 };
 
 const PORT_RANGE = [8710, 8760];

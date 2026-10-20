@@ -11,6 +11,7 @@
 - 时延：OmniSTEval（Polák et al. 2025, arXiv 2509.17349）的 LongYAAL 与 LongLAAL，
   中文按字符算（--char_level）。每个字的出炉时刻：
     CU（不计算力）= 这一段音频的结束位置 t1——流水线要等 VAD 在这里切下去才开始识别；
+      流式识别的一条字幕可能话说完好几秒才出，流水账另记了出这一条时已经收到的音频位置 cu，有就用它；
     CA（计算力在内）= 译文真正出来的墙钟时刻 zhAt 减去开始喂音频的时刻。
   IWSLT 2026 同传赛道按 CU 的 LongYAAL 分档：0–2 秒为低时延，2–4 秒为高时延。
   StreamLAAL 没有算：它要 mwerSegmenter（mweralign 只有 Linux 的轮子，本机编不了），
@@ -97,7 +98,7 @@ def hypothesis_line(talk, run):
         ca_floor = max(ca_floor, float(ca_ms))
         for ch in zh:
             chars.append(ch)
-            cu.append(float(o["t1"]))
+            cu.append(float(o.get("cu", o["t1"])))
             ca.append(ca_floor)
     return {
         "source": talk["id"] + ".wav",
@@ -108,13 +109,19 @@ def hypothesis_line(talk, run):
     }
 
 
+def child_env():
+    """子进程的标准输出按 UTF-8 写。中文 Windows 上管道默认是 GBK：OmniSTEval 打印报告时
+    碰到译文里的零宽字符（U+200C，opus 偶尔会吐）就 UnicodeEncodeError 退出，分数一个都拿不到。"""
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+
+
 def run_omnisteval(work, seg_file, zh_file, hyp_file):
     out = os.path.join(work, "omnisteval")
     cmd = [sys.executable, "-m", "omnisteval.cli", "longform",
            "--speech_segmentation", seg_file, "--ref_sentences_file", zh_file,
            "--hypothesis_file", hyp_file, "--lang", "zh", "--char_level",
            "--bleu_tokenizer", "zh", "--output_folder", out]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=child_env())
     with open(os.path.join(work, "omnisteval.log"), "w", encoding="utf-8") as f:
         f.write(r.stdout + "\n" + r.stderr)
     if r.returncode != 0:
@@ -148,7 +155,7 @@ def run_xcomet(work, resegmented, en_lines):
     out_json = os.path.join(work, "xcomet.json")
     cmd = [exe, "-s", files["src"], "-t", files["mt"], "-r", files["ref"],
            "--model", "Unbabel/XCOMET-XL", "--gpus", "1", "--batch_size", "8", "--to_json", out_json]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=child_env())
     with open(os.path.join(work, "xcomet.log"), "w", encoding="utf-8") as f:
         f.write(r.stdout + "\n" + r.stderr)
     if r.returncode != 0:
@@ -187,10 +194,12 @@ def pipeline_stats(runs, configured_mt):
         fed += run["meta"]["feed"].get("fedSeconds") or 0
         for o in run["rows"]:
             segs += 1
+            # 「这一段音频到手之后多久出来」：whisper 是切下这一块的位置 t1，流式是出这一条时的位置 cu
+            ready = o.get("cu", o["t1"])
             if o.get("enAt"):
-                asr_lag.append(((o["enAt"] - started) * speed - o["t1"]) / 1000)
+                asr_lag.append(((o["enAt"] - started) * speed - ready) / 1000)
             if o.get("zhAt"):
-                cap_lag.append(((o["zhAt"] - started) * speed - o["t1"]) / 1000)
+                cap_lag.append(((o["zhAt"] - started) * speed - ready) / 1000)
                 if o.get("enAt"):
                     mt_ms.append(o["zhAt"] - o["enAt"])
             k = o.get("mt") or "（无译文）"

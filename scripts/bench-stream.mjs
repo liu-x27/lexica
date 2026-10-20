@@ -3,9 +3,10 @@
  * 字幕基准：把公开测试集（MCIF 的 21 场 ACL 演讲，见 fetch-bench.mjs）按实时节奏
  * 喂进实时字幕的流水线，跑完用 bench-score.py 打分。
  *
- *   npm run bench -- --mt opus                     现役配置：CPU 识别 + opus
- *   npm run bench -- --mt hymt7b                   换成 Hy-MT2-7B（llama-server）
- *   npm run bench -- --mt hymt7b --asr-bin <dir>   识别换成另一个 whisper.cpp 构建（如 CUDA 版）
+ *   npm run bench -- --mt opus                     识别用应用默认的流式 Nemotron，翻译 opus
+ *   npm run bench -- --mt opus --asr small         识别换回 whisper small（+ beam5 + 领域提示词）
+ *   npm run bench -- --mt hymt7b                   翻译换成 Hy-MT2-7B（llama-server）
+ *   npm run bench -- --mt hymt7b --asr small --asr-bin <dir>   whisper 换另一个构建（如 CUDA 版）
  *   npm run bench -- --mt opus --talks 2           只跑前两场（试跑用）
  *   npm run bench -- --mt opus --score             跑完接着打分（要 Python 环境，见 README）
  *
@@ -20,8 +21,10 @@
  *   --title <课程名>    每场的课程名，会拼进识别提示词；默认 ACL research talk
  *   --llama-dir <dir>   llama-server.exe 所在目录（等同 LEXICA_LLAMA_DIR）
  *   --data <dir>        别的测试集整理好的目录（结构同 fetch-bench.mjs 的 prepared/）
+ *   --asr <模型>        nemotron（默认，流式）| small | base | tiny
  *   --cpu-only          对应用藏起显卡（CUDA_VISIBLE_DEVICES=-1）：llama-server 退回 CPU，
- *                       量「没有独显的机器」上的表现。CUDA 版的 whisper 也会退回 CPU
+ *                       量「没有独显的机器」上的表现。CUDA 版的 whisper 也会退回 CPU，
+ *                       流式识别用 CPU 版的 NeMo-Speech.cpp
  *   --allow-shared-gpu  显卡上已经有别的计算进程时照样跑（默认拒绝：别人的时延会被我们拖慢，
  *                       我们的也会被别人拖慢）
  */
@@ -41,13 +44,16 @@ const arg = (k, d = null) => (argv.includes(k) ? argv[argv.indexOf(k) + 1] : d);
 const PREPARED = path.resolve(arg('--data', path.join(ROOT, 'data', 'bench', 'mcif', 'prepared')));
 
 const mt = arg('--mt', 'opus');
+const asrModel = arg('--asr', 'nemotron');
+const streaming = !['tiny', 'base', 'small'].includes(asrModel);
 const asrBin = arg('--asr-bin');
 const llamaDir = arg('--llama-dir', process.env.LEXICA_LLAMA_DIR || null);
 const speed = Number(arg('--speed', '1'));
 const nTalks = arg('--talks') ? Number(arg('--talks')) : null;
 const rolling = !flag('--no-rolling');
 const cpuOnly = flag('--cpu-only');
-const asrTag = asrBin ? path.basename(path.resolve(asrBin)) : 'cpu';
+/* whisper small 的轮次沿用原来的名字（opus-cpu、hymt7b-asr-cuda），新识别的用模型名 */
+const asrTag = streaming ? asrModel : (asrBin ? path.basename(path.resolve(asrBin)) : (asrModel === 'small' ? 'cpu' : asrModel));
 const name = arg('--name', `${mt}-${asrTag}${cpuOnly ? '-cpuonly' : ''}`
   + `${rolling ? '' : '-norolling'}${speed !== 1 ? `-x${speed}` : ''}`);
 const outDir = path.join(ROOT, 'dist', 'bench', name);
@@ -97,8 +103,10 @@ function gpuName() {
 /* 这一轮会不会用显卡：Hy-MT2（llama-server -ngl 999）一定用；换了识别构建的，
    多半是 CUDA 版。用的话先看一眼，显卡在忙就停——别人的时延会被我们拖慢，
    我们的也会被别人拖慢。判据是占用率和显存，不是进程列表（理由见 computeLike）。
-   空闲时本机桌面程序常驻约 2.5GB 显存、占用率个位数。 */
-const usesGpu = !cpuOnly && (mt.startsWith('hymt') || !!asrBin);
+   空闲时本机桌面程序常驻约 2.5GB 显存、占用率个位数。
+   流式识别在有 NVIDIA 显卡时用 CUDA 版，也算。 */
+const hasNvidia = gpuNow() !== null;
+const usesGpu = !cpuOnly && (mt.startsWith('hymt') || !!asrBin || (streaming && hasNvidia));
 const BUSY = { util: 20, mem: 4500 };
 if (usesGpu) {
   const g = gpuNow();
@@ -120,7 +128,7 @@ const plan = {
   // 每场的课程名：应用会把它拼进识别提示词（Lecture: <课程名>.），和真实上课一样
   title: arg('--title', 'ACL research talk'),
   settings: {
-    asrModel: 'small',          // 应用默认：small + beam5 + 领域提示词
+    asrModel,                   // 应用默认是流式的 nemotron；whisper 的 small 带 beam5 + 领域提示词
     lectureMtModel: mt,
     mtOnline: false,
     lectureRolling: rolling,
@@ -139,6 +147,7 @@ fs.writeFileSync(path.join(outDir, 'machine.json'), `${JSON.stringify({
   set: prepared.set,
   talks: talks.length,
   mt,
+  asrModel,
   asrBin: asrBin ? path.resolve(asrBin) : null,
   llamaDir: llamaDir ? path.resolve(llamaDir) : null,
   speed,
@@ -155,7 +164,7 @@ fs.writeFileSync(path.join(outDir, 'machine.json'), `${JSON.stringify({
 }, null, 2)}\n`);
 
 const totalSec = prepared.talks.filter((t) => talks.some((x) => x.id === t.id)).reduce((s, t) => s + t.seconds, 0);
-console.log(`基准：${talks.length} 场，音频 ${(totalSec / 60).toFixed(1)} 分钟，${speed} 倍速，翻译 ${mt}`
+console.log(`基准：${talks.length} 场，音频 ${(totalSec / 60).toFixed(1)} 分钟，${speed} 倍速，识别 ${asrModel}，翻译 ${mt}`
   + `${asrBin ? `，识别构建 ${asrBin}` : ''}${rolling ? '' : '，不开滚动字幕'}`);
 console.log(`输出：${path.relative(ROOT, outDir)}（中途断了重跑同一条命令即可接着跑）\n`);
 
@@ -188,7 +197,7 @@ const relay = (d) => {
   log.write(d);
   // 控制台只留每场的开始/结束和报错，逐句的 [lat] 在 electron.log 里
   for (const line of String(d).split(/\r?\n/)) {
-    if (/\[bench\]|\[lecture\] 记录结束|失败|error|Error|\[mt-llama\] 就绪|\[asr\].*就绪/.test(line)) console.log(line);
+    if (/\[bench\]|\[lecture\] 记录结束|失败|error|Error|\[mt-llama\] 就绪|\[asr\].*就绪|\[nemo\]/.test(line)) console.log(line);
   }
 };
 child.stdout.on('data', relay);

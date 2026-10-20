@@ -596,10 +596,12 @@
           <div class="label-rule"><span class="label">实时字幕</span></div>
           ${
             stats.asr?.available
-              ? row('识别模型', `听写用的模型。本机实测：最准（small，默认）约 9 倍实时、
-                  词错率 0.8%；均衡（base）约 34 倍、3.1%。机器吃力、字幕跟不上时再换成均衡。`,
-                  `<div class="seg">${(stats.asr.models || []).map((m) => `
-                    <button class="seg-btn ${(s.asrModel || 'small') === m.key ? 'is-on' : ''}"
+              ? row('识别模型', `流式（Nemotron）边听边出字，公开基准（MCIF 21 场 ACL 演讲）上
+                  词错率 8.0%，whisper small 是 14.7%。它要先运行
+                  <span class="mono">npm run fetch:asr -- --nemo</span>（约 770MB）。
+                  whisper 三档按停顿一段段识别，没装流式时用。`,
+                  `<div class="seg seg-models">${(stats.asr.models || []).map((m) => `
+                    <button class="seg-btn ${(stats.asr.selected || s.asrModel || 'small') === m.key ? 'is-on' : ''}"
                             data-act="asr-model" data-v="${m.key}">${esc(m.label)}</button>`).join('')}</div>`)
               : row('识别模型', `还没有安装。在项目目录运行
                   <span class="mono">npm run fetch:asr</span>（约 90MB）后可用。`,
@@ -620,10 +622,10 @@
                       ${esc(m.label)}</button>`).join('')}</div>`)
               : ''
           }
-          ${stats.asr?.available ? row('领域提示词', `告诉识别引擎这节课在讲什么，它会更倾向于输出这些写法。<br>
-            <span class="faint">这是单项收益最大的一项——实测词错误率从 4.7% 降到 1.6%，
+          ${stats.asr?.available ? row('领域提示词', `告诉 whisper 这节课在讲什么，它会更倾向于输出这些写法。<br>
+            <span class="faint">这是 whisper 单项收益最大的一项——实测词错误率从 4.7% 降到 1.6%，
             能把「twinning」这种同音错词拉回「training」。课程名会自动拼在前面，
-            这里只写术语，逗号分隔。</span>`,
+            这里只写术语，逗号分隔。流式识别不用它，改用术语表里的英文做词增强。</span>`,
             `<textarea class="set-prompt" data-act="asr-prompt" rows="3"
                placeholder="algorithm, hypothesis, gradient descent, …">${esc(s.asrPrompt || '')}</textarea>`) : ''}
           ${

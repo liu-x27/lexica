@@ -203,9 +203,7 @@
     asrStatus: () => ({ available: false, models: [], mtModels: [], recording: false,
       reason: '安卓版没有内置语音识别' }),
     lecStart: () => ({ ok: false, reason: '安卓版没有内置语音识别' }),
-    lecFeed: () => {},
-    // 滚动字幕也依赖识别，安卓上没有
-    lecPartial: () => {},
+    lecPcm: () => {},
     lecStop: () => ({ ok: false, reason: '安卓版没有内置语音识别' }),
     lecList: () => [],
     // 安卓没有课堂记录，自然也没什么可搜、可看的

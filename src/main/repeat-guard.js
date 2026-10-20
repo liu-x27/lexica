@@ -330,4 +330,4 @@ function trimSeamRepeat(prevText, text, { maxWords = 3 } = {}) {
   return { text, removed: 0 };
 }
 
-module.exports = { collapseRepeats, trimSeamRepeat };
+module.exports = { collapseRepeats, trimSeamRepeat, DANGLING_WORDS };

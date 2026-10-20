@@ -23,7 +23,9 @@ const {
   matchTerms, applyGlossary, needProbe, cleanProbe, diffMiddle, frameDiffOk,
   PROBE_FRAME, PROBE_CONTROL,
 } = require('./glossary');
-const { AsrEngine } = require('./asr');
+const { AsrEngine, ASR_MODELS } = require('./asr');
+const { NemoAsr } = require('./nemo-asr');
+const { CaptionAssembler, closeSentence } = require('./stream-captions');
 const { collapseRepeats, trimSeamRepeat } = require('./repeat-guard');
 const { LectureRecorder } = require('./lecture');
 const { runShotSequence, seedShotProfile } = require('./self-test');
@@ -140,10 +142,11 @@ const DEFAULTS = {
    * 转写文件里也留着英文，课后想要更准的译文可以用翻译页重译。
    */
   lectureMtModel: 'opus',
-  /* 识别模型。实测 WER：tiny 未测 / base 4.7% / small + beam + 提示词 0.8%。
-     small 在常驻服务 + audio-ctx 下有 9 倍实时余量，所以默认用它——
+  /* 识别模型。默认流式的 Nemotron（npm run fetch:asr -- --nemo），没装就退回 whisper 的 small。
+     公开基准（MCIF 21 场 ACL 演讲）上的词错率和时延见 README「On a public benchmark」。
+     whisper 各档：small 在常驻服务 + audio-ctx 下有 9 倍实时余量——
      早先「small 跑不动」是拿旧配置测出来的错结论。 */
-  asrModel: 'small',
+  asrModel: 'nemotron',
   /**
    * 识别用的领域提示词。
    *
@@ -194,12 +197,45 @@ let asr = null;
 let lectures = null;
 let online = null;
 let rollAsr = null;   // 滚动字幕的临时稿服务，与主服务分开
+let nemo = null;      // 流式识别（NeMo-Speech.cpp），装了就优先用，见 pickAsr
 let mainWin = null;
 let quickWin = null;
 let subWin = null;
 let tray = null;
 let settings = { ...DEFAULTS };
 let quitting = false;
+
+/**
+ * 这一场用哪个识别。设置里选的装了就用它；选的是流式但没装（或者流式反复崩溃被停用了），
+ * 退回 whisper 的 small，再没有就随便一个装了的。
+ * @returns {{ engine: 'nemo'|'whisper', model: string } | null}
+ */
+function pickAsr() {
+  const want = settings.asrModel;
+  if (nemo?.available && nemo.installedModels().some((m) => m.key === want)) return { engine: 'nemo', model: want };
+  const ws = asr?.available ? asr.installedModels().map((m) => m.key) : [];
+  const w = ws.includes(want) ? want : (ws.includes('small') ? 'small' : ws[0]);
+  if (w) return { engine: 'whisper', model: w };
+  const n = nemo?.available ? nemo.installedModels()[0]?.key : null;
+  return n ? { engine: 'nemo', model: n } : null;
+}
+
+/**
+ * 识别的状态，设置页和实时字幕页共用：两种识别装了的模型合在一个列表里（流式的在前），
+ * selected 是实际会用的那个（设置里选的没装时它和 settings.asrModel 不一样）。
+ */
+function asrStatus() {
+  const w = asr ? asr.status() : { available: false, models: [] };
+  const n = nemo?.available ? nemo.installedModels() : [];
+  return {
+    ...w,
+    available: !!(w.available || n.length),
+    models: [...n, ...(w.models || []).map((m) => ({ ...m, engine: 'whisper' }))],
+    running: !!(w.running || nemo?.running),
+    selected: pickAsr()?.model || null,
+    nemo: nemo ? { installed: nemo.runtimeInstalled, backend: nemo.backend, disabled: nemo.disabled } : null,
+  };
+}
 
 /* ========================================================================== */
 /*  窗口                                                                       */
@@ -717,7 +753,7 @@ function registerIpc() {
     mtOnline: online ? online.stats() : null,
     // 设置页要按「装了哪些模型」来渲染选项，没装的不该给出来
     mtModels: translator ? translator.installedModels() : [],
-    asr: asr ? asr.status() : { available: false, models: [] },
+    asr: asrStatus(),
     appVersion: app.getVersion(),
   }));
 
@@ -828,14 +864,16 @@ function registerIpc() {
 
     if (patch.lectureRolling !== undefined) {
       /* 关掉时顺手把临时稿服务停掉，别让它白占内存和端口。
-         采音层下次 asrStatus() 就不会再发快照了；记录中途改的话
-         快照还会来几条，handlePartial 开头那道判断会挡掉。 */
+         快照的节奏在 feedBlock 里，它每次都看这个开关，下一块音频起就不再出临时稿了。
+         流式识别的临时稿是模型自己给的，不受这个开关影响以外的东西。 */
       if (!settings.lectureRolling) stopRollAsr();
       else if (lectures.active) startRollAsr();
     }
 
-    if ((patch.asrModel !== undefined || patch.asrPrompt !== undefined) && asr.status().running) {
-      // 正在记录时换模型或改提示词：重启服务，音频队列继续往里送
+    if ((patch.asrModel !== undefined || patch.asrPrompt !== undefined) && asr.status().running
+      && lec.engine === 'whisper' && ASR_MODELS[settings.asrModel]) {
+      /* 正在记录时换 whisper 的档位或改提示词：重启服务，音频队列继续往里送。
+         换成流式的（或者从流式换走）要等下一场：两种识别的切分方式不一样，半路换不过去 */
       const prompt = [lectures.info()?.title ? `Lecture: ${lectures.info().title}.` : '',
         settings.asrPrompt || ''].filter(Boolean).join(' ').trim();
       asr.start(settings.asrModel, { prompt })
@@ -1200,6 +1238,22 @@ function registerIpc() {
     /** 上一条出去的字幕和它的结束时刻：查接缝处的重说要用 */
     lastEn: '',
     lastT1: -1,
+    /** 这一场用哪个识别：'whisper'（按停顿切块）或 'nemo'（流式） */
+    engine: null,
+    /** 这一场一共收到了多少采样点：流式出错、半路换成 whisper 时，切分器从这里接着计时 */
+    fedSamples: 0,
+    /** whisper：切分器在主进程里，采音层和自测/基准都把原始音频一块块推到这里 */
+    vad: null,
+    /** whisper 的滚动字幕快照：上一次在第几个采样点、有没有挂着临时稿 */
+    lastPartialAt: 0,
+    sentPartial: false,
+    /** 推到界面上的临时稿次数、切出去送识别的段数（自测断言和基准记录要用） */
+    partials: 0,
+    cuts: 0,
+    /** nemo：一路流和拼字幕的 */
+    stream: null,
+    asm: null,
+    streamLagWarned: false,
   };
 
   /* 字幕事件要同时发给主窗口和悬浮窗：两边都可能在显示同一条流水线的结果
@@ -1210,26 +1264,281 @@ function registerIpc() {
   };
 
   handle('asr:status', () => ({
-    ...asr.status(),
+    ...asrStatus(),
+    engine: lec.engine,
     mtModels: translator.installedModels(),
     mtModel: translator.model,
     maxChunkSec: LECTURE_MAX_CHUNK_SEC,
     silenceMs: settings.lectureSilenceMs,
-    // 采音层要据此决定是否发「说到一半」的快照
-    rolling: !!settings.lectureRolling && !!rollAsr?.available,
+    rolling: !!settings.lectureRolling,
     rollingMs: settings.lectureRollingMs,
     recording: lectures.active,
     session: lectures.info(),
   }));
 
-  handle('lec:start', async ({ title, source, sourceLabel } = {}) => {
-    if (lectures.active) return { ok: false, reason: '已经在记录了' };
+  /** 每场开始前把识别这一侧的状态清干净 */
+  function resetLecState() {
+    lec.queue.length = 0;
+    lec.busy = false;
+    lec.dropped = 0;
+    lec.lagWarned = false;
+    lec.lastEn = '';
+    lec.lastT1 = -1;
+    lec.fedSamples = 0;
+    lec.vad = null;
+    lec.lastPartialAt = 0;
+    lec.sentPartial = false;
+    lec.partials = 0;
+    lec.cuts = 0;
+    lec.stream = null;
+    lec.asm = null;
+    lec.streamLagWarned = false;
+    roll.lastText = '';
+  }
+
+  /**
+   * 起识别：流式的开一路流；whisper 的起服务、建切分器、起临时稿服务。
+   * 流式起不来（运行时坏了、显存不够）就退回 whisper，课照样能记。
+   * @param prompt whisper 的领域提示词（流式用不上）
+   * @param boost  流式的增强词（术语表），whisper 用不上
+   * @returns 实际用的模型 key
+   */
+  async function beginAsr({ prompt = '', boost = [] } = {}) {
+    const plan = pickAsr();
+    if (!plan) throw new Error('没有安装语音识别组件，请先运行 npm run fetch:asr');
+    if (plan.engine === 'nemo') {
+      try {
+        await nemo.start(plan.model);
+        await openNemoStream(boost);
+        lec.engine = 'nemo';
+        return plan.model;
+      } catch (e) {
+        console.error('[nemo] 流式识别起不来，这一场改用 whisper：', e.message);
+        nemo.stop();
+        lecSend('lec:warn', { message: `流式识别没能启动，这一场改用 whisper：${e.message.split('\n')[0]}` });
+        if (!asr.available) throw e;
+      }
+    }
+    const model = plan.engine === 'whisper' ? plan.model : pickWhisperFallback();
+    await startWhisperPath(model, prompt);
+    return model;
+  }
+
+  /** 流式退回 whisper 时用哪个：small 优先 */
+  function pickWhisperFallback() {
+    const ws = asr.installedModels().map((m) => m.key);
+    return ws.includes('small') ? 'small' : ws[0];
+  }
+
+  async function startWhisperPath(model, prompt) {
+    await asr.start(model, { prompt });
+    lec.engine = 'whisper';
+    const { VadChunker } = require('./vad-chunker');
+    lec.vad = new VadChunker({
+      rate: 16000,
+      maxMs: LECTURE_MAX_CHUNK_SEC * 1000,
+      silenceMs: settings.lectureSilenceMs,
+    });
+    // 半路从流式换过来的话，时间轴接着前面已经收到的音频往后排
+    lec.vad.baseSamples = lec.fedSamples;
+    lec.lastPartialAt = lec.fedSamples;
+    startRollAsr();
+  }
+
+  /** 术语表的英文当增强词。缓存式 RNNT 的增强分数一般给 2~3（服务端上限 5） */
+  function glossaryBoost() {
+    const phrases = [...new Set(user.glossary().map((r) => String(r.surface || r.term || '').trim())
+      .filter((p) => p && p.length <= 60))].slice(0, 500);
+    return phrases.length ? [{ phrases, boost: 2.5 }] : [];
+  }
+
+  async function openNemoStream(boost) {
+    const s = await nemo.openStream({ boost });
+    lec.stream = s;
+    // 拼字幕的门限用 stream-captions.js 里挑好的默认值，只按实际步长估词出现的滞后
+    lec.asm = new CaptionAssembler({ lagSec: s.chunkSec + 0.1 });
+    s.on('partial', ({ text, audioSec }) => {
+      if (lec.stream !== s) return;
+      emitStreamCaptions(lec.asm.partial(text, audioSec));
+      showStreamPartial();
+    });
+    s.on('final', ({ text, words, audioSec }) => {
+      if (lec.stream !== s) return;
+      emitStreamCaptions(lec.asm.final({ text, words, audioSec }));
+      showStreamPartial();
+    });
+    s.on('error', (e) => {
+      if (lec.stream !== s || !lectures.active) return;
+      streamFailed(e);
+    });
+  }
+
+  /**
+   * 流式这一路半路坏了（服务崩了、连接断了）：攒着的字幕先出掉，剩下的音频改走 whisper。
+   * 坏掉那一刻到 whisper 起来之间的几秒音频会丢，但课不会断。
+   */
+  async function streamFailed(err) {
+    const s = lec.stream;
+    lec.stream = null;
+    console.error('[nemo] 流式识别中断，改用 whisper：', err.message);
+    if (lec.asm) emitStreamCaptions(lec.asm.flush(s ? s.audioSec : 0));
+    showStreamPartial(true);
+    try { s?.close(); } catch { /* 忽略 */ }
+    nemo.stop();
     if (!asr.available) {
-      return { ok: false, reason: '没有安装语音识别组件，请先运行 npm run fetch:asr' };
+      lecSend('lec:warn', { message: `流式识别中断：${err.message}` });
+      return;
+    }
+    lecSend('lec:warn', { message: '流式识别中断，已切换到 whisper 继续记录。' });
+    const title = lectures.info()?.title;
+    const prompt = [title ? `Lecture: ${title}.` : '', settings.asrPrompt || ''].filter(Boolean).join(' ').trim();
+    try {
+      await startWhisperPath(pickWhisperFallback(), prompt);
+    } catch (e) {
+      lecSend('lec:warn', { message: `切换 whisper 也失败了：${e.message}` });
+    }
+  }
+
+  /** 流式拼出来的字幕：和 whisper 那边 drainLecture 出字幕之后的步骤一样 */
+  function emitStreamCaptions(caps) {
+    for (const cap of caps) {
+      if (!lectures.active) return;
+      /* Nemotron 不像 whisper 那样原地打转，但去重的规则在正常语速下一个真词都不删，
+         过一遍没有坏处（万一哪天换个模型会转呢） */
+      const loop = collapseRepeats(cap.en, { seconds: (cap.t1 - cap.t0) / 1000 });
+      const text = loop.text;
+      if (loop.removed) console.log(`[nemo] 去重：打转 ${loop.removed} 词`);
+      if (!text || /^[\s.,!?\-—[\]()]*$/.test(text)) continue;
+      // cu：出这一条时已经处理到的音频位置，基准的 CU 时延按它算（见 stream-captions.js 文件头）
+      const id = lectures.addSegment({ t0: cap.t0, t1: cap.t1, en: text, cu: cap.at });
+      lecSend('lec:segment', { id, t0: cap.t0, t1: cap.t1, en: text });
+      const s = lec.stream;
+      const fed = (lec.fedSamples / 16000) * 1000;
+      console.log(`[lat] 流式字幕 ${((cap.t1 - cap.t0) / 1000).toFixed(1)}s `
+        + `(${text.split(/\s+/).length} 词)${s ? `，积压 ${Math.max(0, fed - s.audioSec * 1000).toFixed(0)}ms` : ''}`);
+      // 送去翻译的补成一句话（开头大写、句末加句号），理由见 closeSentence
+      translateSegment(id, closeSentence(text));
+    }
+  }
+
+  /** 流式的滚动字幕：攒着没出的 + 还没定稿的临时稿 */
+  function showStreamPartial(clear = false) {
+    const text = clear || !lec.asm ? '' : lec.asm.displayText;
+    if (text === roll.lastText) return;
+    roll.lastText = text;
+    if (!text) {
+      lecSend('lec:partial', { en: '', zh: '' });
+      return;
+    }
+    lec.partials += 1;
+    lecSend('lec:partial', { en: text, ms: 0 });
+    // 在线翻译可用时，和 whisper 的临时稿一样节流着给一份译文（理由见 ROLL_MT_EVERY）
+    if (online?.available && Date.now() - roll.lastMtAt >= ROLL_MT_EVERY) {
+      roll.lastMtAt = Date.now();
+      online.translate(text, { timeoutMs: ONLINE_TIMEOUT.live }).then((tr) => {
+        if (tr.ok && roll.lastText === text && lectures.active) {
+          lecSend('lec:partial', { en: text, zh: fixTerms(text, tr.text), ms: 0 });
+        }
+      }).catch(() => {});
+    }
+  }
+
+  /**
+   * 一块原始音频（2048 个采样点，128ms）。采音层（lec:pcm）和自测/基准（lec:selfTestFeed）都走这里，
+   * 所以「怎么切、什么时候出临时稿」只有这一份。
+   */
+  function feedBlock(block) {
+    if (!lectures.active || !block.length) return;
+    lec.fedSamples += block.length;
+    if (lec.stream) {
+      lec.stream.push(block);
+      /* 服务端处理不过来（机器被别的程序占满）：音频在连接里越积越多，字幕越来越晚。
+         先吭一声，和 whisper 那边队列积压的提示一样 */
+      if (!lec.streamLagWarned && lec.stream.lagSec > 15) {
+        lec.streamLagWarned = true;
+        lecSend('lec:warn', { message: '识别有些跟不上语速，字幕会延迟。' });
+      }
+      return;
+    }
+    if (!lec.vad) return;
+    const cuts = lec.vad.push(block);
+    for (const cut of cuts) {
+      lec.cuts += 1;
+      enqueueLecture(cut.pcm, cut.startMs);
     }
 
-    const modelKey = asr.installedModels().some((m) => m.key === settings.asrModel)
-      ? settings.asrModel : (asr.installedModels()[0]?.key || 'base');
+    /* 滚动字幕的快照按**音频时间**走：每过 lectureRollingMs 的音频给一次。
+       实时采音时就是墙钟，自测按 4 倍速喂的时候也不用另算。刚切过段就不必出了，正式字幕马上就到 */
+    if (!settings.lectureRolling) return;
+    if (cuts.length) {
+      lec.lastPartialAt = lec.fedSamples;
+      lec.sentPartial = false;
+      return;
+    }
+    const every = ((settings.lectureRollingMs || 1500) / 1000) * 16000;
+    if (lec.fedSamples - lec.lastPartialAt < every) return;
+    lec.lastPartialAt = lec.fedSamples;
+    const snap = lec.vad.peek();
+    // 没说话就别送：whisper 对纯静音会凭空编出句子来
+    if (snap && snap.sawSpeech) {
+      lec.sentPartial = true;
+      lec.partials += 1;
+      handlePartial(snap.pcm).catch(() => {});
+    } else if (lec.sentPartial) {
+      /* 说着说着停了。这时不会有定稿来覆盖临时稿，不主动撤掉的话，最后那半句
+         会一直挂在屏幕上——实测尾音上 whisper 还会编出一整句不存在的话。 */
+      lec.sentPartial = false;
+      roll.seq += 1;
+      roll.lastText = '';
+      lecSend('lec:partial', { en: '', zh: '' });
+    }
+  }
+
+  /**
+   * 收尾：流式的告诉服务端音频完了、等最后一句的定稿；whisper 的把切分器里剩下的尾巴送去识别。
+   * 之后照旧等识别队列和在途译文排空（见 lec:stop）。
+   */
+  async function endAsr() {
+    const s = lec.stream;
+    if (s) {
+      await finishStream();
+      lec.stream = null;
+      s.close();
+    }
+    flushVadTail();
+    lec.vad = null;
+  }
+
+  /** 流式：告诉服务端音频完了，等最后一句定稿，把攒着的字幕全出掉。之后这一路不再收音频 */
+  async function finishStream() {
+    const s = lec.stream;
+    if (!s) return;
+    await s.finish();
+    if (lec.asm && lec.stream === s) emitStreamCaptions(lec.asm.flush(s.audioSec));
+    showStreamPartial(true);
+  }
+
+  /** whisper：切分器里还没切出去的尾巴送去识别（太短或全是静音的，flush 自己会丢掉） */
+  function flushVadTail() {
+    const tail = lec.vad ? lec.vad.flush() : null;
+    if (!tail) return;
+    lec.cuts += 1;
+    enqueueLecture(tail.pcm, tail.startMs);
+  }
+
+  /** 停掉识别服务。流式的不常驻：0.6B 的模型占着七八百 MB 内存（或显存），下次开课再起 */
+  function stopAsr() {
+    asr.stop();
+    stopRollAsr();
+    nemo.stop();
+    lec.engine = null;
+  }
+
+  handle('lec:start', async ({ title, source, sourceLabel } = {}) => {
+    if (lectures.active) return { ok: false, reason: '已经在记录了' };
+    if (!pickAsr()) {
+      return { ok: false, reason: '没有安装语音识别组件，请先运行 npm run fetch:asr' };
+    }
 
     /* 课程名拼在提示词前面：课程名里往往就有最关键的领域词
        （"Reinforcement Learning"、"Organic Chemistry"），
@@ -1237,19 +1546,14 @@ function registerIpc() {
     const prompt = [title ? `Lecture: ${title}.` : '', settings.asrPrompt || '']
       .filter(Boolean).join(' ').trim();
 
+    resetLecState();
+    let modelKey;
     try {
-      await asr.start(modelKey, { prompt });
+      modelKey = await beginAsr({ prompt, boost: glossaryBoost() });
     } catch (e) {
+      stopAsr();
       return { ok: false, reason: e.message };
     }
-
-    lec.queue.length = 0;
-    lec.busy = false;
-    lec.dropped = 0;
-    lec.lagWarned = false;
-    lec.lastEn = '';
-    lec.lastT1 = -1;
-    startRollAsr();
 
     /* 记录期间临时切到实时专用的翻译模型，停止时切回来。
        两个模型在工作进程里各自缓存，来回切不会重新加载。 */
@@ -1276,20 +1580,22 @@ function registerIpc() {
   });
 
   /**
-   * 收一段音频。故意用 on 而不是 handle：渲染层不该等识别结果，
-   * 结果通过 lec:segment / lec:translated 事件回推。
+   * 收一块原始音频（采音层每 128ms 发一次）。故意用 on 而不是 handle：渲染层不该等识别结果，
+   * 结果通过 lec:segment / lec:translated / lec:partial 事件回推。
+   *
+   * 原先切分（VadChunker）和滚动字幕的快照节奏都在渲染层，切好的段再经 lec:feed / lec:partial 送过来；
+   * 自测和基准则在主进程里照抄了一份同样的判断。流式识别要的是不切的连续音频，
+   * 索性两种识别都把原始音频送到主进程，在 feedBlock 里分流，判断只剩一份。
    */
-  ipcMain.on('lec:feed', (_e, payload) => {
-    if (!lectures.active) return;
-    const { pcm, startMs } = payload || {};
-    if (!pcm) return;
+  ipcMain.on('lec:pcm', (_e, payload) => {
+    if (!lectures.active || !payload?.pcm) return;
     // 结构化克隆过来的是 ArrayBuffer，转回 Float32 视图
-    enqueueLecture(new Float32Array(pcm), startMs);
+    feedBlock(new Float32Array(payload.pcm));
   });
 
   /**
-   * 一段切好的音频进识别队列。采音那边（lec:feed）和自测/基准的喂入
-   * （lec:selfTestFeed）都走这里，积压丢弃的规则只有这一份。
+   * 一段切好的音频进识别队列（whisper）。feedBlock 的切分器和收尾时的尾巴都走这里，
+   * 积压丢弃的规则只有这一份。
    */
   function enqueueLecture(audio, startMs) {
     /* 队列积压说明识别跟不上（换了 small 模型、或者机器一时被别的程序占满）。
@@ -1399,19 +1705,6 @@ function registerIpc() {
     roll.lastText = '';
     try { rollAsr?.stop(); } catch { /* 忽略 */ }
   }
-
-  ipcMain.on('lec:partial', (_e, payload) => {
-    if (!payload?.pcm) {
-      /* 采音层说「没话了」。要主动撤掉临时稿——这种情况下不会有定稿
-         来覆盖它，不撤的话最后半句（甚至 whisper 在尾音上编出来的整句）
-         会一直挂在屏幕上。 */
-      roll.seq += 1;
-      roll.lastText = '';
-      if (lectures.active) lecSend('lec:partial', { en: '', zh: '' });
-      return;
-    }
-    handlePartial(new Float32Array(payload.pcm)).catch(() => {});
-  });
 
   async function drainLecture() {
     if (lec.busy || !lec.queue.length || !lectures.active) return;
@@ -1526,6 +1819,8 @@ function registerIpc() {
 
   handle('lec:stop', async () => {
     if (!lectures.active) return { ok: false, reason: '没有在记录' };
+    // 流式的等最后一句定稿；whisper 的把切分器里剩的尾巴送进队列
+    await endAsr();
     /* 先把队列里剩的音频识别完再收尾，否则最后十几秒会丢。
      *
      * 判据是「还有没有进展」，不是固定的墙钟时间。原先写死等 25 秒，
@@ -1557,14 +1852,14 @@ function registerIpc() {
       await new Promise((r) => setTimeout(r, 100));
     }
     const out = await lectures.stop();
-    asr.stop();
-    stopRollAsr();
+    const engine = lec.engine;
+    stopAsr();
     if (lec.prevMtModel) {
       translator.setModel(lec.prevMtModel);
       lec.prevMtModel = null;
     }
     console.log(`[lecture] 记录结束：${out.segments} 条，${out.dir}`);
-    return { ok: true, ...out, dropped: lec.dropped };
+    return { ok: true, ...out, dropped: lec.dropped, engine };
   });
 
   /**
@@ -1574,28 +1869,19 @@ function registerIpc() {
    * 打包版跑到这步卡了 19 分钟只出 2 条——Chromium 会把不可见窗口的定时器
    * 限流到每秒一次。主进程没有这个限制。
    *
-   * 这里用的是和真实采音同一个 VadChunker、同一个入队函数（enqueueLecture），
-   * 所以除「拿到麦克风音频」之外的每一环都被覆盖。基准模式（bench.js）
-   * 也走这里，speed 给 1。
+   * 每一块都交给 feedBlock，和真实采音（lec:pcm）是同一个入口：切分、滚动字幕、流式识别，
+   * 除「拿到麦克风音频」之外的每一环都被覆盖。基准模式（bench.js）也走这里，speed 给 1。
    *
    * @returns startedAt 喂第一块的墙钟时刻：流水账里的 enAt/zhAt 减去它，
    *          就是字幕在这段音频的时间轴上出现的位置（speed 为 1 时）
    */
   handle('lec:selfTestFeed', async ({ pcm, speed = 4 } = {}) => {
     if (!lectures.active) return { error: '没有正在进行的记录' };
-    const { VadChunker } = require('./vad-chunker');
     const audio = new Float32Array(pcm);
-    const vad = new VadChunker({
-      rate: 16000,
-      maxMs: LECTURE_MAX_CHUNK_SEC * 1000,
-      silenceMs: settings.lectureSilenceMs,
-    });
-
     // 和采音那边的 AudioWorklet 一样，一块 2048 个采样点（128ms）
     const step = 2048;
-    let fed = 0;
-    let partials = 0;
-    let lastPartial = 0;
+    const cutsBefore = lec.cuts;
+    const partialsBefore = lec.partials;
 
     /* 节拍对齐到开始时刻，不在每块之后固定睡一段：setTimeout 每次都会多睡一点
        （Windows 上常是几毫秒），一小时的音频喂下来会慢出几十秒，基准量出来的
@@ -1607,40 +1893,21 @@ function registerIpc() {
       const due = startedAt + ((end / 16000) * 1000) / speed;
       await new Promise((r) => setTimeout(r, Math.max(0, due - Date.now())));
       if (!lectures.active) break;
-
-      const cuts = vad.push(audio.subarray(i, end));
-      for (const cut of cuts) {
-        enqueueLecture(cut.pcm, cut.startMs);
-        fed += 1;
-      }
-
-      /* 临时稿也要在自测里走一遍，判断逻辑照抄 audio-source.js：
-         刚切过段就跳过、按倍速换算间隔。不加这一段的话滚动字幕
-         在自动化里完全没被覆盖过，而它恰好是没法用麦克风验证的那部分。 */
-      if (settings.lectureRolling && !cuts.length) {
-        const now = Date.now();
-        const every = Math.max(150, Math.round((settings.lectureRollingMs || 1500) / speed));
-        if (now - lastPartial >= every) {
-          lastPartial = now;
-          const snap = vad.peek();
-          if (snap && snap.sawSpeech) {
-            partials += 1;
-            handlePartial(snap.pcm).catch(() => {});
-          }
-        }
-      } else if (cuts.length) {
-        lastPartial = Date.now();
-      }
+      // slice 出一份：流式那边要转成 PCM16 发走，whisper 那边切分器会留着引用
+      feedBlock(audio.slice(i, end));
     }
-    const tail = lectures.active ? vad.flush() : null;
-    if (tail) {
-      enqueueLecture(tail.pcm, tail.startMs);
-      fed += 1;
+    /* 音频喂完了：切分器里剩的尾巴现在就送去识别，流式的把最后一句定稿。
+       真实采音时讲者停下来之后麦克风还在送静音，流式那边靠这段静音发定稿；
+       这里音频是突然断的，不收的话最后半句会一直挂在屏幕上，直到 lec:stop。 */
+    if (lectures.active) {
+      flushVadTail();
+      await finishStream();
     }
     return {
       fedSeconds: audio.length / 16000,
-      chunks: fed,
-      partials,
+      engine: lec.engine,
+      chunks: lec.cuts - cutsBefore,
+      partials: lec.partials - partialsBefore,
       speed,
       startedAt,
       wallSeconds: (Date.now() - startedAt) / 1000,
@@ -1657,27 +1924,21 @@ function registerIpc() {
    */
   handle('sub:start', async () => {
     if (lectures.active) return { ok: false, reason: '正在记录课堂字幕，先停止那边' };
-    if (!asr.available) {
+    if (!pickAsr()) {
       return { ok: false, reason: '没有安装语音识别组件，请先运行 npm run fetch:asr' };
     }
 
-    const modelKey = asr.installedModels().some((m) => m.key === settings.asrModel)
-      ? settings.asrModel : (asr.installedModels()[0]?.key || 'base');
+    resetLecState();
+    let modelKey;
     try {
-      /* 影视对白不是学术演讲，领域提示词只会把它往术语上带偏，
-         所以这里刻意不传 prompt。 */
-      await asr.start(modelKey, { prompt: '' });
+      /* 影视对白不是学术演讲，领域提示词（whisper）和术语表增强（流式）只会把它往术语上带偏，
+         所以这里刻意都不给。 */
+      modelKey = await beginAsr({ prompt: '', boost: [] });
     } catch (e) {
+      stopAsr();
       return { ok: false, reason: e.message };
     }
 
-    lec.queue.length = 0;
-    lec.busy = false;
-    lec.dropped = 0;
-    lec.lagWarned = false;
-    lec.lastEn = '';
-    lec.lastT1 = -1;
-    startRollAsr();
     lec.prevMtModel = translator.model;
     if (settings.lectureMtModel && settings.lectureMtModel !== translator.model) {
       translator.setModel(settings.lectureMtModel);
@@ -1694,9 +1955,13 @@ function registerIpc() {
 
   handle('sub:stop', async () => {
     if (!lectures.active) return { ok: true };
+    /* 悬浮窗关掉就是不看了，不等最后一句：流式的直接断开，whisper 的队列照旧不等 */
+    const s = lec.stream;
+    lec.stream = null;
+    lec.vad = null;
+    try { s?.close(); } catch { /* 忽略 */ }
     const out = await lectures.stop();
-    asr.stop();
-    stopRollAsr();
+    stopAsr();
     if (lec.prevMtModel) {
       translator.setModel(lec.prevMtModel);
       lec.prevMtModel = null;
@@ -1802,12 +2067,14 @@ function registerIpc() {
 
   /**
    * 转写整段录音。渲染层已经解码重采样成 16k 单声道 Float32 送进来。
-   * 走 whisper-cli 而不是常驻服务：一次性任务不在乎模型加载，
-   * 而且可以用跑不动实时的 small 模型换准确率。
+   * 用设置里选的识别：流式的走 nemo-speech transcribe --stream（同一个流式解码，不按实时节奏），
+   * whisper 的走 whisper-cli 而不是常驻服务——一次性任务不在乎模型加载。
+   * modelKey 可以指定一个 whisper 档位（没装就照设置来）。
    */
   handle('lec:transcribeFile', async ({ pcm, title, modelKey } = {}) => {
     if (!pcm) return { ok: false, reason: '没有音频数据' };
-    if (!asr.available) return { ok: false, reason: '没有安装语音识别组件' };
+    const plan = pickAsr();
+    if (!plan) return { ok: false, reason: '没有安装语音识别组件' };
     if (lectures.active) return { ok: false, reason: '正在实时记录，先停止再导入' };
 
     const audio = new Float32Array(pcm);
@@ -1815,17 +2082,22 @@ function registerIpc() {
     const { wrapWav, floatToPcm16 } = require('./asr');
     await fsp.writeFile(tmp, wrapWav(floatToPcm16(audio), 16000));
 
-    const model = asr.installedModels().some((m) => m.key === modelKey)
-      ? modelKey : settings.asrModel;
+    const whisperModels = asr.available ? asr.installedModels().map((m) => m.key) : [];
+    const useNemo = plan.engine === 'nemo' && !whisperModels.includes(modelKey);
+    const model = useNemo ? plan.model
+      : (whisperModels.includes(modelKey) ? modelKey : (plan.engine === 'whisper' ? plan.model : pickWhisperFallback()));
 
     try {
       lecSend('lec:importProgress', { phase: 'asr', percent: 0 });
-      const r = await asr.transcribeFile(tmp, {
-        modelKey: model,
-        prompt: [title ? `Lecture: ${title}.` : '', settings.asrPrompt || '']
-          .filter(Boolean).join(' ').trim(),
-        onProgress: (p) => lecSend('lec:importProgress', { phase: 'asr', percent: p }),
-      });
+      const onProgress = (p) => lecSend('lec:importProgress', { phase: 'asr', percent: p });
+      const r = useNemo
+        ? await nemo.transcribeFile(tmp, { modelKey: model, onProgress })
+        : await asr.transcribeFile(tmp, {
+          modelKey: model,
+          prompt: [title ? `Lecture: ${title}.` : '', settings.asrPrompt || '']
+            .filter(Boolean).join(' ').trim(),
+          onProgress,
+        });
       if (!r.segments.length) return { ok: false, reason: '没有识别出任何内容' };
 
       const info = await lectures.start({
@@ -2072,6 +2344,9 @@ app.whenReady().then(() => {
      基准（scripts/bench-stream.mjs --asr-bin）用它比较 CPU 和显卡两种构建。 */
   const asrBin = process.env.LEXICA_ASR_BIN || null;
   asr = new AsrEngine(path.join(dataDir, 'asr'), { maxChunkSec: LECTURE_MAX_CHUNK_SEC, binDir: asrBin });
+  /* 流式识别：data/asr-nemo 下的 NeMo-Speech.cpp 运行时（CUDA 版和/或 CPU 版）和 Nemotron 模型。
+     和 whisper 一样不在启动时拉起，开始记录时才起（见 beginAsr）。 */
+  nemo = new NemoAsr(path.join(dataDir, 'asr-nemo'));
   /* 临时稿单独一个服务。
    *
    * 为什么不复用主服务：请求在服务端是串行的，一次临时稿（small+beam5 约 900ms）
@@ -2111,7 +2386,7 @@ app.whenReady().then(() => {
     /* app.exit 不发 will-quit，子进程得自己收：whisper-server 和 llama-server
        在 Windows 上不会跟着父进程退出。 */
     const finish = (code) => {
-      try { translator?.dispose(); asr?.dispose(); rollAsr?.dispose(); } catch { /* 忽略 */ }
+      try { translator?.dispose(); asr?.dispose(); rollAsr?.dispose(); nemo?.dispose(); } catch { /* 忽略 */ }
       app.exit(code);
     };
     runBench(process.env.LEXICA_BENCH, {
@@ -2173,6 +2448,7 @@ app.on('will-quit', () => {
      rollAsr 原先漏在这里：开着滚动字幕退出，它会一直占着端口和几百 MB 内存。 */
   asr?.dispose();
   rollAsr?.dispose();
+  nemo?.dispose();
   try { if (subWin && !subWin.isDestroyed()) subWin.destroy(); } catch { /* 忽略 */ }
   // 强退时把记录收尾，别让最后几条卡在队列里
   try { lectures?.stop(); } catch { /* 忽略 */ }

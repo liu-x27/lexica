@@ -57,18 +57,13 @@
   /* ==================================================================== */
 
   /* 采音抽到了 audio-source.js：电影字幕悬浮窗也要用同一套，
-     两处各抄一份的话采样率、VAD 参数、清理顺序必然会漂。 */
+     两处各抄一份的话采样率、清理顺序必然会漂。
+     切分和滚动字幕都在主进程，这里只把原始音频一块块送过去。 */
   async function startCapture(source) {
     st.audio = await window.LexicaAudio.start(source, {
-      maxChunkSec: st.status?.maxChunkSec || 9,
-      silenceMs: st.status?.silenceMs || 420,
       onLevel: (v) => { st.level = v; },
-      // 转移 buffer 所有权，避免每段都复制一遍（一段有几十万个采样点）
-      onChunk: (cut) => api.lecFeed(cut.pcm.buffer, cut.startMs),
-      /* 滚动字幕：说到一半就先出临时稿。节奏由音频回调驱动
-         （见 audio-source.js 里的注释——定时器在窗口不可见时会被限流）。 */
-      partialMs: st.status?.rolling ? (st.status.rollingMs || 1500) : 0,
-      onPartial: (snap) => api.lecPartial(snap ? snap.pcm.buffer : null),
+      // 一块 8KB，每秒 8 块；结构化克隆会复制一份，量小到可以不管
+      onPcm: (pcm) => api.lecPcm(pcm.buffer),
     });
   }
 
@@ -190,7 +185,6 @@
       const r = await api.lecTranscribeFile({
         pcm: pcm.buffer,
         title: st.title || picked.name.replace(/\.[^.]+$/, ''),
-        modelKey: st.status?.models?.some((m) => m.key === 'small') ? 'small' : undefined,
       });
       st.importing = null;
       if (!r?.ok) {
@@ -342,9 +336,9 @@
   };
 
   /**
-   * 自测钩子：拿一段音频按**实时链路**跑一遍（VAD 切分 → lecFeed → 识别 → 翻译 → 落盘）。
+   * 自测钩子：拿一段音频按**实时链路**跑一遍（主进程的 feedBlock → 切分/流式识别 → 翻译 → 落盘）。
    *
-   * 麦克风在自动化里喂不了，但从 lecFeed 往后的每一环都和真实使用完全一致，
+   * 麦克风在自动化里喂不了，但从 feedBlock 往后的每一环都和真实使用（lecPcm）完全一致，
    * 所以这条路径能验证除「采音」以外的全部逻辑。正常运行时挂着无害。
    */
   Lx.lectureSelfTest = async function lectureSelfTest() {

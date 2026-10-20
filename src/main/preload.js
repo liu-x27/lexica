@@ -83,11 +83,10 @@ contextBridge.exposeInMainWorld('lexica', {
   /* 实时字幕（上课听写） */
   asrStatus: () => call('asr:status'),
   lecStart: (opts) => call('lec:start', opts),
-  /* 音频块用 send 而不是 invoke：渲染层不该等识别结果，
-     结果通过 onLecSegment / onLecTranslated 事件回来。 */
-  lecFeed: (pcm, startMs) => ipcRenderer.send('lec:feed', { pcm, startMs }),
-  // 滚动字幕：「说到一半」的音频快照，主进程拿它出临时稿
-  lecPartial: (pcm) => ipcRenderer.send('lec:partial', { pcm }),
+  /* 原始音频块（128ms）用 send 而不是 invoke：渲染层不该等识别结果，
+     结果通过 onLecSegment / onLecTranslated / onLecPartial 事件回来。
+     切分和滚动字幕的节奏都在主进程（index.js 的 feedBlock）。 */
+  lecPcm: (pcm) => ipcRenderer.send('lec:pcm', { pcm }),
   lecStop: () => call('lec:stop'),
   lecList: () => call('lec:list'),
   lecSearch: (query) => call('lec:search', query),

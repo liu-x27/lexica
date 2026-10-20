@@ -58,8 +58,9 @@
       <div class="blank-text">
         实时字幕用的是 whisper.cpp 的官方 Windows 版 + 语音模型，完全离线。<br>
         在项目目录执行：<br><br>
-        <span class="mono">npm run fetch:asr</span> — 下载识别组件（约 90MB，含 base 模型）<br>
-        <span class="mono">npm run fetch:asr -- --all</span> — 连快速版与高精度版一起下（约 330MB）<br><br>
+        <span class="mono">npm run fetch:asr -- --nemo</span> — 流式识别（推荐，约 770MB）<br>
+        <span class="mono">npm run fetch:asr</span> — whisper（约 90MB，含 base 模型）<br>
+        <span class="mono">npm run fetch:asr -- --all</span> — whisper 三档一起下（约 330MB）<br><br>
         <span class="faint">装好后重启应用即可。存放位置：${esc(st.status?.dir || 'data/asr')}</span>
       </div>
     </div></div></div>`;
@@ -69,7 +70,7 @@
     const busy = st.running || st.starting || !!st.importing;
     const models = st.status?.models || [];
     const modelLabel = models.find((m) => m.key === st.status?.model)?.label
-      || models.find((m) => m.key === (Lx.settings?.asrModel))?.label
+      || models.find((m) => m.key === (st.status?.selected || Lx.settings?.asrModel))?.label
       || '—';
 
     return `

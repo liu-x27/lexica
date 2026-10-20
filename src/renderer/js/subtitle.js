@@ -89,13 +89,9 @@
       const r = await api.subStart();
       if (!r?.ok) throw new Error(r?.reason || '无法开始');
 
+      // 切分和滚动字幕（看电影最吃延迟，它在这里收益最大）都在主进程
       st.cap = await window.LexicaAudio.start('system', {
-        maxChunkSec: st.status?.maxChunkSec || 9,
-        silenceMs: st.status?.silenceMs || 420,
-        onChunk: (cut) => api.lecFeed(cut.pcm.buffer, cut.startMs),
-        // 看电影最吃延迟，滚动字幕在这里收益最大
-        partialMs: st.status?.rolling ? (st.status.rollingMs || 1500) : 0,
-        onPartial: (snap) => api.lecPartial(snap ? snap.pcm.buffer : null),
+        onPcm: (pcm) => api.lecPcm(pcm.buffer),
       });
 
       st.running = true;
