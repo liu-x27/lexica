@@ -165,11 +165,12 @@ LongLAAL is the same formula over OmniSTEval's own resegmentation.
 | **Nemotron on the CPU + `opus-mt` (the default now)** | **8.0%** | **29.6** | 24.0 | **3.34 / 3.63 s** | 0.25 / 0.39 s |
 | CPU whisper + Hy-MT2-7B on the GPU | 21.1% | 37.8 | 36.0 | 3.30 / 4.56 s | 1.07 / 1.57 s |
 | CUDA whisper + Hy-MT2-7B on the GPU | 20.5% | 38.2 | 36.1 | 3.29 / 3.84 s | 0.36 / 0.75 s |
+| Nemotron on the GPU + Hy-MT2-7B on the GPU | 8.0% | 40.6 | 36.1 | 3.15 / 3.34 s | 0.16 / 0.26 s |
 | CPU whisper + Hy-MT2-1.8B, no GPU at all | 21.1% | 35.8 | 35.6 | 3.20 / 5.60 s | 1.88 / 3.13 s |
 
 Intel Core Ultra 9 275HX (24 cores), RTX 5080 Laptop GPU (16 GB), 32 GB RAM, Windows 11;
-whisper.cpp b5130 (its CPU and CUDA 12.4 builds), NeMo-Speech.cpp 0.2.0 (CPU build),
-llama.cpp b11190. For the Nemotron row the last column starts when a caption goes out (`cu`),
+whisper.cpp b5130 (its CPU and CUDA 12.4 builds), NeMo-Speech.cpp 0.2.0 (its CPU and CUDA builds),
+llama.cpp b11190. For the Nemotron rows the last column starts when a caption goes out (`cu`),
 so it is translation alone; the wait for the pause is in CU. `npm run fetch:bench`
 and `npm run bench` reproduce it; scoring needs a separate Python environment, listed in the
 [Chinese README](README.zh-CN.md#公开基准mcif-上的端到端成绩).
@@ -181,8 +182,14 @@ What it says:
   LongYAAL (CU) 3.43 → 3.34 s and (CA) 4.72 → 3.63 s. CA gains most because recognition happens
   while the speaker talks: when a caption is cut its English is already there, and only the
   translation is left. [Streaming recognition](#streaming-recognition) has how it got there,
-  including a first run that was slower and translated worse. No GPU configuration has been
-  run with it yet.
+  including a first run that was slower and translated worse.
+- **With a GPU, streaming recognition and Hy-MT2-7B together are the best row.** Against
+  CUDA whisper with the same translator: WER 20.5% → 8.0%, BLEU 38.2 → 40.6, chrF 36.1 → 36.1,
+  LongYAAL (CU) 3.29 → 3.15 s and (CA) 3.84 → 3.34 s. Each Chinese line follows its caption by
+  a median 0.16 s (p90 0.26 s), since Hy-MT2-7B translates a line in a median 150 ms; the
+  number guard fired on none of the 1,693 lines. The CUDA build of Nemotron is as accurate as
+  the CPU build (8.0% both) without being identical: 52 of 17,042 words differ, and segment
+  boundaries moved in 6 of the 21 talks.
 - **The synthetic clip flattered recognition.** 0.8% WER there, 21.1% here, 51.5% on the
   worst talk. The largest error class is insertions — 2,075 against 1,231 substitutions over
   16,797 reference words. 30 chunks come out at over 4.5 words a second because whisper
